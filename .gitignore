@@ -1,3 +1,5 @@
 ﻿node_modules/
 .vite/
 dist/
+unzipped_docs/
+src/data/rawEmployees.json
