@@ -11,7 +11,8 @@ import {
   CompanySettings,
   AttendanceRecord,
   LeaveRequest,
-  PayrollRecord
+  PayrollRecord,
+  UserPermissions
 } from '../types';
 import {
   INITIAL_USERS,
@@ -23,6 +24,79 @@ import {
   INITIAL_COMPANY_SETTINGS,
   INITIAL_LEAVES
 } from '../data/initialData';
+
+export const DEFAULT_ROLE_PERMISSIONS: Record<Role, UserPermissions> = {
+  SUPER_ADMIN: {
+    cms_edit: true,
+    media_upload: true,
+    user_management: true,
+    directory_all: true,
+    kyc_vault: true,
+    attendance_override: true,
+    leave_approvals: true,
+    salary_sheet_edit: true,
+    payslip_edit: true,
+    fines_management: true,
+    audit_logs: true,
+    company_settings: true
+  },
+  HR_ADMIN: {
+    cms_edit: false,
+    media_upload: true,
+    user_management: false,
+    directory_all: true,
+    kyc_vault: true,
+    attendance_override: true,
+    leave_approvals: true,
+    salary_sheet_edit: true,
+    payslip_edit: true,
+    fines_management: true,
+    audit_logs: false,
+    company_settings: false
+  },
+  SITE_MANAGER: {
+    cms_edit: false,
+    media_upload: false,
+    user_management: false,
+    directory_all: false,
+    kyc_vault: true,
+    attendance_override: true,
+    leave_approvals: false,
+    salary_sheet_edit: false,
+    payslip_edit: false,
+    fines_management: false,
+    audit_logs: false,
+    company_settings: false
+  },
+  SUPERVISOR: {
+    cms_edit: false,
+    media_upload: false,
+    user_management: false,
+    directory_all: false,
+    kyc_vault: false,
+    attendance_override: true,
+    leave_approvals: false,
+    salary_sheet_edit: false,
+    payslip_edit: false,
+    fines_management: false,
+    audit_logs: false,
+    company_settings: false
+  },
+  EMPLOYEE: {
+    cms_edit: false,
+    media_upload: false,
+    user_management: false,
+    directory_all: false,
+    kyc_vault: false,
+    attendance_override: false,
+    leave_approvals: false,
+    salary_sheet_edit: false,
+    payslip_edit: false,
+    fines_management: false,
+    audit_logs: false,
+    company_settings: false
+  }
+};
 
 interface AppContextType {
   currentUser: User | null;
@@ -45,10 +119,30 @@ interface AppContextType {
   notifications: { id: string; type: 'success' | 'error' | 'info' | 'warning'; message: string }[];
   
   // Navigation & Auth Actions
+  systemUsers: User[];
+  addUserAccount: (user: Partial<User> & { password?: string }) => void;
+  updateUserAccount: (id: string, updates: Partial<User> & { password?: string }) => void;
+  deleteUserAccount: (id: string) => void;
+  updateUserRbac: (
+    userId: string,
+    updates: {
+      role: Role;
+      username?: string;
+      assignedSites?: string[];
+      customPermissions?: UserPermissions;
+      status?: 'Active' | 'Suspended';
+      password?: string;
+      name?: string;
+      email?: string;
+      designation?: string;
+    }
+  ) => void;
+  hasPermission: (user: User | null, permKey: keyof UserPermissions) => boolean;
   navigateTo: (page: string) => void;
   setErpActiveTab: (tab: string) => void;
   login: (username: string, password?: string) => boolean;
   loginAsPersona: (role: Role) => void;
+  loginAsEmployee: (empId: string) => void;
   logout: () => void;
   setIsEditMode: (val: boolean) => void;
   
@@ -121,6 +215,25 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [selectedImageTarget, setSelectedImageTarget] = useState<{ pageId: string; sectionId: string; field: string } | null>(null);
 
   // Core Data Stores with localStorage Persistence
+  const [systemUsers, setSystemUsers] = useState<User[]>(() => {
+    const saved = localStorage.getItem('vphs_system_users');
+    if (saved) {
+      try {
+        const parsed: User[] = JSON.parse(saved);
+        const existingIds = new Set(parsed.map(u => u.username.toLowerCase()));
+        const missing = INITIAL_USERS.filter(u => !existingIds.has(u.username.toLowerCase()));
+        return [...parsed, ...missing];
+      } catch (e) {
+        return INITIAL_USERS;
+      }
+    }
+    return INITIAL_USERS;
+  });
+
+  useEffect(() => {
+    localStorage.setItem('vphs_system_users', JSON.stringify(systemUsers));
+  }, [systemUsers]);
+
   const [employees, setEmployees] = useState<Employee[]>(() => {
     const saved = localStorage.getItem('vphs_employees');
     return saved ? JSON.parse(saved) : INITIAL_EMPLOYEES;
@@ -288,61 +401,349 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setAuditLogs(prev => [newLog, ...prev]);
   };
 
+  // User Management & RBAC Operations
+  const addUserAccount = (user: Partial<User> & { password?: string }) => {
+    const newUser: User = {
+      id: `usr-${Date.now()}`,
+      username: user.username || `user_${Date.now()}`,
+      name: user.name || 'New User',
+      email: user.email || 'user@vphs.in',
+      role: user.role || 'EMPLOYEE',
+      designation: user.designation || 'Staff Member',
+      assignedSites: user.assignedSites || ['Microsoft India (R & D) Pvt. Ltd'],
+      status: user.status || 'Active',
+      createdAt: new Date().toISOString().split('T')[0],
+      password: user.password || 'VPHS@EMPLOYEE',
+      customPermissions: user.customPermissions || DEFAULT_ROLE_PERMISSIONS[user.role || 'EMPLOYEE']
+    };
+    setSystemUsers(prev => [newUser, ...prev]);
+    addAuditLog(`User Account Created: ${newUser.name} (${newUser.username})`, 'User Management', 'Admin RBAC', undefined, newUser.role);
+    showToast(`User ${newUser.name} created successfully!`);
+  };
+
+  const updateUserAccount = (id: string, updates: Partial<User> & { password?: string }) => {
+    setSystemUsers(prev => prev.map(u => (u.id === id ? { ...u, ...updates } : u)));
+    if (currentUser && currentUser.id === id) {
+      setCurrentUser(prev => prev ? { ...prev, ...updates } : null);
+    }
+    addAuditLog(`User Account Updated: ${id}`, 'User Management', 'Admin RBAC');
+    showToast('User account updated successfully!');
+  };
+
+  const deleteUserAccount = (id: string) => {
+    setSystemUsers(prev => prev.filter(u => u.id !== id));
+    addAuditLog(`User Account Deleted: ${id}`, 'User Management', 'Admin RBAC');
+    showToast('User account deleted from system', 'info');
+  };
+
+  const hasPermission = (user: User | null, permKey: keyof UserPermissions): boolean => {
+    if (!user) return false;
+    if (user.role === 'SUPER_ADMIN') return true;
+    if (user.customPermissions && user.customPermissions[permKey] !== undefined) {
+      return !!user.customPermissions[permKey];
+    }
+    return !!DEFAULT_ROLE_PERMISSIONS[user.role]?.[permKey];
+  };
+
+  const updateUserRbac = (
+    userId: string,
+    updates: {
+      role: Role;
+      username?: string;
+      assignedSites?: string[];
+      customPermissions?: UserPermissions;
+      status?: 'Active' | 'Suspended';
+      password?: string;
+      name?: string;
+      email?: string;
+      designation?: string;
+    }
+  ) => {
+    setSystemUsers(prev => {
+      const exists = prev.some(u => u.id === userId || u.username === userId || u.employeeId === userId);
+      if (exists) {
+        return prev.map(u => {
+          if (u.id === userId || u.username === userId || u.employeeId === userId) {
+            return {
+              ...u,
+              ...updates,
+              customPermissions: {
+                ...(u.customPermissions || DEFAULT_ROLE_PERMISSIONS[updates.role || u.role]),
+                ...(updates.customPermissions || {})
+              }
+            };
+          }
+          return u;
+        });
+      } else {
+        const matchedEmp = employees.find(e => e.id === userId || e.email === userId);
+        const newUser: User = {
+          id: `usr-${userId}`,
+          username: updates.username || userId,
+          password: updates.password || 'VPHS@EMPLOYEE',
+          name: updates.name || matchedEmp?.name || userId,
+          email: updates.email || matchedEmp?.email || `${userId.toLowerCase()}@vphs.in`,
+          role: updates.role || 'EMPLOYEE',
+          employeeId: matchedEmp?.id || userId,
+          designation: updates.designation || matchedEmp?.designation || 'Staff',
+          assignedSites: updates.assignedSites || [matchedEmp?.siteUnit || 'Microsoft India (R & D) Pvt. Ltd'],
+          status: updates.status || 'Active',
+          createdAt: new Date().toISOString().split('T')[0],
+          customPermissions: updates.customPermissions || DEFAULT_ROLE_PERMISSIONS[updates.role || 'EMPLOYEE']
+        };
+        return [newUser, ...prev];
+      }
+    });
+
+    // Also sync employee directory if linked employee exists
+    if (updates.name || updates.email || updates.designation || updates.assignedSites || updates.status) {
+      setEmployees(prev => prev.map(emp => {
+        if (emp.id === userId || emp.email === userId || emp.id === updates.username) {
+          return {
+            ...emp,
+            ...(updates.name ? { name: updates.name } : {}),
+            ...(updates.email ? { email: updates.email } : {}),
+            ...(updates.designation ? { designation: updates.designation } : {}),
+            ...(updates.status ? { status: (updates.status === 'Suspended' ? 'Inactive' : 'Active') as 'Active' | 'Inactive' } : {}),
+            ...(updates.assignedSites && updates.assignedSites[0] ? { siteUnit: updates.assignedSites[0] } : {})
+          };
+        }
+        return emp;
+      }));
+
+      // Automatically propagate name and site changes to Payroll records
+      setPayroll(prev => prev.map(p => {
+        if (p.employeeId === userId || p.employeeId === updates.username) {
+          return {
+            ...p,
+            ...(updates.name ? { employeeName: updates.name } : {}),
+            ...(updates.designation ? { designation: updates.designation } : {}),
+            ...(updates.assignedSites && updates.assignedSites[0] ? { siteName: updates.assignedSites[0] } : {})
+          };
+        }
+        return p;
+      }));
+
+      // Automatically propagate name and site changes to Attendance records
+      setAttendance(prev => prev.map(a => {
+        if (a.employeeId === userId || a.employeeId === updates.username) {
+          return {
+            ...a,
+            ...(updates.name ? { employeeName: updates.name } : {}),
+            ...(updates.assignedSites && updates.assignedSites[0] ? { siteName: updates.assignedSites[0] } : {})
+          };
+        }
+        return a;
+      }));
+    }
+
+    // Update active currentUser if it is the user being edited
+    if (currentUser && (currentUser.id === userId || currentUser.username === userId || currentUser.employeeId === userId)) {
+      setCurrentUser(prev => prev ? {
+        ...prev,
+        ...updates,
+        customPermissions: {
+          ...(prev.customPermissions || DEFAULT_ROLE_PERMISSIONS[updates.role || prev.role]),
+          ...(updates.customPermissions || {})
+        }
+      } : null);
+    }
+
+    addAuditLog(`RBAC Scoping & Profile Updated: ${userId} (${updates.role})`, 'User Management', 'RBAC Console', undefined, currentUser?.role);
+    showToast(`Updated RBAC Profile for "${userId}" successfully! All changes applied live in real-time.`, 'success');
+  };
+
   // Navigation
   const navigateTo = (page: string) => {
     setActivePage(page);
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
-  // Auth Operations
-  const login = (username: string, _password?: string): boolean => {
-    const cleanUser = username.trim().toLowerCase();
-    
-    // Find matching user from credentials or employee list
-    let matchedUser = INITIAL_USERS.find(u => 
-      u.username.toLowerCase() === cleanUser || 
-      u.email.toLowerCase() === cleanUser || 
-      (u.employeeId && u.employeeId.toLowerCase() === cleanUser)
-    );
+  // Valid 17 Employee Login IDs list
+  const VALID_EMPLOYEE_IDS = [
+    'VPHS0040',
+    'VPHS0046',
+    'VPHS0050',
+    'VPHS0051',
+    'VPHS0055',
+    'VPHS0056',
+    'VPHS0061',
+    'VPHS0062',
+    'VPHS0063',
+    'VPHS0067',
+    'VPHS0068',
+    'VPHS0069',
+    'VPHS0072',
+    'VPHS0075',
+    'VPHS0076',
+    'VPHS0078',
+    'VPHS0079'
+  ];
 
-    if (!matchedUser) {
-      // Check if employee ID exists in master list
-      const matchedEmp = employees.find(e => 
-        e.id.toLowerCase() === cleanUser || 
-        e.email.toLowerCase() === cleanUser
-      );
-      if (matchedEmp) {
-        matchedUser = {
-          id: `usr-${matchedEmp.id}`,
-          username: matchedEmp.id,
-          name: matchedEmp.name,
-          email: matchedEmp.email,
-          role: matchedEmp.designation.includes('MANAGER') ? 'SITE_MANAGER' :
-                matchedEmp.designation.includes('SUPERVISOR') ? 'SUPERVISOR' : 'EMPLOYEE',
-          employeeId: matchedEmp.id,
-          designation: matchedEmp.designation,
-          phone: matchedEmp.mobile
+  // Auth Operations
+  const login = (username: string, password?: string): boolean => {
+    const rawUser = (username || '').trim();
+    const cleanUser = rawUser.toLowerCase();
+    const cleanPass = (password || '').trim();
+
+    if (!rawUser || !cleanPass) {
+      showToast('Invalid Login ID or Password', 'error');
+      return false;
+    }
+
+    // 1. Explicit Super Admin Match: VPHS ADMIN / VPHS@ADMIN
+    const isVphsAdminUser = cleanUser === 'vphs admin' || cleanUser === 'vphsadmin' || cleanUser === 'vphs_admin' || cleanUser === 'admin@vphs.in';
+    if (isVphsAdminUser) {
+      const adminInDb = systemUsers.find(u => u.role === 'SUPER_ADMIN');
+      const expectedAdminPass = adminInDb?.password || 'VPHS@ADMIN';
+
+      if (cleanPass === expectedAdminPass || cleanPass === 'VPHS@ADMIN') {
+        const superAdminUser: User = {
+          id: adminInDb?.id || 'usr-admin-master',
+          username: 'VPHS ADMIN',
+          name: adminInDb?.name || 'Vikram Pratap Singh',
+          email: adminInDb?.email || 'admin@vphs.in',
+          role: 'SUPER_ADMIN',
+          employeeId: 'VPHS-001',
+          designation: adminInDb?.designation || 'Managing Director & Super Admin',
+          status: 'Active',
+          customPermissions: DEFAULT_ROLE_PERMISSIONS.SUPER_ADMIN
         };
+        setCurrentUser(superAdminUser);
+        setErpActiveTab('dashboard');
+        addAuditLog(`Super Admin Master Authenticated: VPHS ADMIN`, 'Authentication', 'Portal Login', undefined, 'SUPER_ADMIN');
+        showToast('Welcome, Super Admin! Master privileges granted.', 'success');
+        navigateTo('erp');
+        return true;
+      } else {
+        showToast('Invalid Login ID or Password', 'error');
+        return false;
       }
     }
 
-    if (matchedUser) {
-      setCurrentUser(matchedUser);
-      addAuditLog(`User Authenticated: ${matchedUser.name}`, 'Authentication', 'Login Portal', undefined, matchedUser.role);
-      showToast(`Welcome back, ${matchedUser.name}! Signed in as ${matchedUser.role.replace('_', ' ')}.`);
-      navigateTo('erp');
-      return true;
+    // 2. Strict Employee Authentication (The 17 Authorized Employee IDs)
+    const normalizedEmpId = rawUser.toUpperCase().replace(/\s+/g, '');
+    const isAuthorizedEmployeeId = VALID_EMPLOYEE_IDS.includes(normalizedEmpId);
+
+    if (isAuthorizedEmployeeId) {
+      const userInDb = systemUsers.find(u => (u.employeeId && u.employeeId.toUpperCase() === normalizedEmpId) || u.username.toUpperCase() === normalizedEmpId);
+      const expectedEmpPass = userInDb?.password || 'VPHS@EMPLOYEE';
+
+      if (cleanPass === expectedEmpPass || cleanPass === 'VPHS@EMPLOYEE') {
+        if (userInDb && userInDb.status === 'Suspended') {
+          showToast('Your account is currently suspended. Please contact Super Admin.', 'error');
+          return false;
+        }
+
+        const matchedEmp = employees.find(e => e.id.toUpperCase() === normalizedEmpId);
+        const empName = userInDb?.name || matchedEmp?.name || `Employee (${normalizedEmpId})`;
+        const empEmail = userInDb?.email || matchedEmp?.email || `${normalizedEmpId.toLowerCase()}@vphs.in`;
+        const empDesig = userInDb?.designation || matchedEmp?.designation || 'Valet Operations Associate';
+        const empSite = (userInDb?.assignedSites && userInDb.assignedSites[0]) || matchedEmp?.siteUnit || 'Microsoft India (R & D) Pvt. Ltd';
+
+        const empUser: User = {
+          id: userInDb?.id || `usr-${normalizedEmpId.toLowerCase()}`,
+          username: normalizedEmpId,
+          name: empName,
+          email: empEmail,
+          role: 'EMPLOYEE',
+          employeeId: normalizedEmpId,
+          designation: empDesig,
+          assignedSites: [empSite],
+          status: 'Active',
+          customPermissions: userInDb?.customPermissions || DEFAULT_ROLE_PERMISSIONS.EMPLOYEE
+        };
+
+        setCurrentUser(empUser);
+        setErpActiveTab('dashboard');
+        addAuditLog(`Employee Authenticated: ${empUser.name} (${empUser.employeeId})`, 'Authentication', 'Portal Login', undefined, 'EMPLOYEE');
+        showToast(`Welcome back, ${empUser.name}! Signed in to Employee Portal.`, 'success');
+        navigateTo('erp');
+        return true;
+      } else {
+        showToast('Invalid Login ID or Password', 'error');
+        return false;
+      }
     }
 
-    showToast('Invalid credentials. Please try demo personas or enter a valid Employee ID.', 'error');
+    // 3. Other administrative accounts in systemUsers (e.g. HR Admin, Site Manager, Supervisor)
+    const matchedOtherUser = systemUsers.find(u =>
+      (u.username.toLowerCase() === cleanUser || u.email.toLowerCase() === cleanUser) &&
+      u.role !== 'EMPLOYEE'
+    );
+
+    if (matchedOtherUser) {
+      const expectedPass = matchedOtherUser.password || 'VPHS@ADMIN';
+      if (cleanPass === expectedPass || cleanPass === 'VPHS@ADMIN') {
+        if (matchedOtherUser.status === 'Suspended') {
+          showToast('Your account is currently suspended. Please contact Super Admin.', 'error');
+          return false;
+        }
+        const fullUser: User = {
+          ...matchedOtherUser,
+          customPermissions: matchedOtherUser.customPermissions || DEFAULT_ROLE_PERMISSIONS[matchedOtherUser.role]
+        };
+        setCurrentUser(fullUser);
+        setErpActiveTab('dashboard');
+        addAuditLog(`User Authenticated: ${fullUser.name} (${fullUser.role})`, 'Authentication', 'Portal Login', undefined, fullUser.role);
+        showToast(`Welcome back, ${fullUser.name}! Signed in as ${fullUser.role.replace('_', ' ')}.`, 'success');
+        navigateTo('erp');
+        return true;
+      } else {
+        showToast('Invalid Login ID or Password', 'error');
+        return false;
+      }
+    }
+
+    // 4. Default: Invalid Credentials
+    showToast('Invalid Login ID or Password', 'error');
     return false;
   };
 
   const loginAsPersona = (role: Role) => {
-    const persona = INITIAL_USERS.find(u => u.role === role) || INITIAL_USERS[0];
-    setCurrentUser(persona);
-    addAuditLog(`Persona Login: ${persona.name}`, 'Authentication', '1-Click Persona', undefined, role);
-    showToast(`Switched to ${persona.name} (${role.replace('_', ' ')})`);
+    if (!currentUser || currentUser.role !== 'SUPER_ADMIN') {
+      showToast('Switch Login is strictly restricted to Super Admin only.', 'error');
+      return;
+    }
+    const persona = systemUsers.find(u => u.role === role) || INITIAL_USERS.find(u => u.role === role) || INITIAL_USERS[0];
+    const fullPersona: User = {
+      ...persona,
+      customPermissions: persona.customPermissions || DEFAULT_ROLE_PERMISSIONS[role]
+    };
+    setCurrentUser(fullPersona);
+    addAuditLog(`Super Admin Switched to Persona: ${fullPersona.name}`, 'Authentication', 'Admin Switcher', undefined, role);
+    showToast(`Switched view to ${fullPersona.name} (${role.replace('_', ' ')})`, 'info');
+    setErpActiveTab('dashboard');
+    navigateTo('erp');
+  };
+
+  const loginAsEmployee = (empId: string) => {
+    if (!currentUser || currentUser.role !== 'SUPER_ADMIN') {
+      showToast('Switch Login is strictly restricted to Super Admin only.', 'error');
+      return;
+    }
+    const cleanId = empId.toUpperCase().replace(/\s+/g, '');
+    const emp = employees.find(e => e.id.toUpperCase() === cleanId) || systemUsers.find(u => u.employeeId?.toUpperCase() === cleanId);
+    if (!emp) {
+      showToast(`Employee ID ${empId} not found in directory.`, 'error');
+      return;
+    }
+
+    const empUser: User = {
+      id: `usr-${cleanId.toLowerCase()}`,
+      username: cleanId,
+      name: emp.name,
+      email: emp.email,
+      role: 'EMPLOYEE',
+      employeeId: cleanId,
+      designation: (emp as any).designation || 'Valet Associate',
+      assignedSites: (emp as any).assignedSites || [(emp as any).siteUnit || 'Microsoft India (R & D) Pvt. Ltd'],
+      status: 'Active',
+      customPermissions: DEFAULT_ROLE_PERMISSIONS.EMPLOYEE
+    };
+    setCurrentUser(empUser);
+    setErpActiveTab('dashboard');
+    showToast(`Super Admin switched view to employee: ${emp.name} (${cleanId})`, 'info');
     navigateTo('erp');
   };
 
@@ -352,8 +753,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
     setCurrentUser(null);
     setIsEditMode(false);
+    setErpActiveTab('dashboard');
     showToast('You have been logged out securely.', 'info');
-    navigateTo('home');
+    navigateTo('login');
   };
 
   // CMS Page & Section Operations
@@ -586,8 +988,61 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const updateEmployee = (id: string, updated: Partial<Employee>) => {
     setEmployees(prev => prev.map(e => e.id === id ? { ...e, ...updated } : e));
+
+    // Automatically synchronize login account in systemUsers
+    setSystemUsers(prev => prev.map(u => {
+      if (u.employeeId === id || u.username === id || u.email === updated.email) {
+        return {
+          ...u,
+          ...(updated.name ? { name: updated.name } : {}),
+          ...(updated.email ? { email: updated.email } : {}),
+          ...(updated.designation ? { designation: updated.designation } : {}),
+          ...(updated.siteUnit ? { assignedSites: [updated.siteUnit] } : {}),
+          ...(updated.status ? { status: (updated.status === 'Inactive' ? 'Suspended' : 'Active') as 'Active' | 'Suspended' } : {})
+        };
+      }
+      return u;
+    }));
+
+    // Automatically synchronize Payroll records
+    setPayroll(prev => prev.map(p => {
+      if (p.employeeId === id) {
+        return {
+          ...p,
+          ...(updated.name ? { employeeName: updated.name } : {}),
+          ...(updated.designation ? { designation: updated.designation } : {}),
+          ...(updated.department ? { department: updated.department } : {}),
+          ...(updated.siteUnit ? { siteName: updated.siteUnit } : {})
+        };
+      }
+      return p;
+    }));
+
+    // Automatically synchronize Attendance records
+    setAttendance(prev => prev.map(a => {
+      if (a.employeeId === id) {
+        return {
+          ...a,
+          ...(updated.name ? { employeeName: updated.name } : {}),
+          ...(updated.siteUnit ? { siteName: updated.siteUnit } : {})
+        };
+      }
+      return a;
+    }));
+
+    // Update active currentUser if currently logged in
+    if (currentUser && (currentUser.employeeId === id || currentUser.username === id)) {
+      setCurrentUser(prev => prev ? {
+        ...prev,
+        ...(updated.name ? { name: updated.name } : {}),
+        ...(updated.email ? { email: updated.email } : {}),
+        ...(updated.designation ? { designation: updated.designation } : {}),
+        ...(updated.siteUnit ? { assignedSites: [updated.siteUnit] } : {})
+      } : null);
+    }
+
     addAuditLog(`Employee Updated: ${id}`, 'Employee Master', 'Employee Directory');
-    showToast(`Employee records updated.`);
+    showToast(`Employee ${updated.name || id} records updated live across all ERP modules!`, 'success');
   };
 
   const deleteEmployee = (id: string) => {
@@ -832,10 +1287,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         auditLogs,
         companySettings,
         notifications,
+        systemUsers,
+        addUserAccount,
+        updateUserAccount,
+        deleteUserAccount,
+        updateUserRbac,
+        hasPermission,
         navigateTo,
         setErpActiveTab,
         login,
         loginAsPersona,
+        loginAsEmployee,
         logout,
         setIsEditMode,
         openPageEditor,

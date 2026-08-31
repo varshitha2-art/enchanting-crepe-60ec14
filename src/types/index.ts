@@ -1,16 +1,35 @@
 export type Role = 'SUPER_ADMIN' | 'HR_ADMIN' | 'SITE_MANAGER' | 'SUPERVISOR' | 'EMPLOYEE';
 
+export interface UserPermissions {
+  cms_edit: boolean;
+  media_upload: boolean;
+  user_management: boolean;
+  directory_all: boolean;
+  kyc_vault: boolean;
+  attendance_override: boolean;
+  leave_approvals: boolean;
+  salary_sheet_edit: boolean;
+  payslip_edit: boolean;
+  fines_management: boolean;
+  audit_logs: boolean;
+  company_settings: boolean;
+}
+
 export interface User {
   id: string;
   username: string;
+  password?: string;
   name: string;
   email: string;
   role: Role;
   employeeId?: string;
   avatar?: string;
-  assignedSites?: string[]; // For Site Manager / Supervisor
+  assignedSites?: string[]; // For Site Manager / Supervisor / Custom Scoped Users
   phone?: string;
   designation?: string;
+  status?: 'Active' | 'Suspended';
+  createdAt?: string;
+  customPermissions?: UserPermissions;
 }
 
 export interface EmployeeDocument {
