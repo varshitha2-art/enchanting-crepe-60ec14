@@ -41,7 +41,8 @@ export const EmployeeMaster: React.FC = () => {
     deleteEmployee,
     updateUserRbac,
     showToast,
-    uploadEmployeeDocument
+    uploadEmployeeDocument,
+    setErpActiveTab
   } = useApp();
 
   const role = currentUser?.role || 'EMPLOYEE';
