@@ -28,7 +28,8 @@ import {
   Building2,
   User,
   Paperclip,
-  ExternalLink
+  ExternalLink,
+  Sliders
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { PayslipRecord, Role } from '../../types';
@@ -51,9 +52,6 @@ export const PayrollEngine: React.FC = () => {
   const role: Role = currentUser?.role || 'EMPLOYEE';
   const isSuperAdmin = role === 'SUPER_ADMIN' || role === 'HR_ADMIN';
 
-  // Sub-tabs for Admin: 'payslips' | 'batch'
-  const [adminTab, setAdminTab] = useState<'payslips' | 'batch'>('payslips');
-
   // Filters
   const [selectedEmpFilter, setSelectedEmpFilter] = useState<string>('all');
   const [selectedMonthFilter, setSelectedMonthFilter] = useState<string>('all');
@@ -68,6 +66,11 @@ export const PayrollEngine: React.FC = () => {
   const [replaceModalOpen, setReplaceModalOpen] = useState(false);
   const [targetReplaceRecord, setTargetReplaceRecord] = useState<PayslipRecord | null>(null);
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
+
+  // Person-Specific Edit Modal State
+  const [editModalOpen, setEditModalOpen] = useState(false);
+  const [editingRecord, setEditingRecord] = useState<PayslipRecord | null>(null);
+  const [editFile, setEditFile] = useState<File | null>(null);
 
   // Upload Form State
   const [uploadEmpId, setUploadEmpId] = useState<string>('VPHS0040');
@@ -111,12 +114,26 @@ export const PayrollEngine: React.FC = () => {
     salaryInputs.employerEsi
   );
 
-  // Edit Payslip Modal State
-  const [editModalOpen, setEditModalOpen] = useState(false);
-  const [editingRecord, setEditingRecord] = useState<PayslipRecord | null>(null);
+  // Calculate live totals for the edit modal
+  const editTotals = editingRecord
+    ? calculateSalarySummary(
+        editingRecord.basicSalary || 0,
+        editingRecord.vda || 0,
+        editingRecord.hra || 0,
+        editingRecord.washingAllowance || 0,
+        editingRecord.otherAllowances || 0,
+        editingRecord.epfDeduction || 0,
+        editingRecord.esiDeduction || 0,
+        editingRecord.ptDeduction || 0,
+        editingRecord.otherDeductions || 0,
+        editingRecord.employerPf || 0,
+        editingRecord.employerEsi || 0
+      )
+    : null;
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const replaceFileInputRef = useRef<HTMLInputElement>(null);
+  const editFileInputRef = useRef<HTMLInputElement>(null);
 
   // 1. Strict Scoping:
   // If Employee, ONLY show payslips matching their employeeId / username
@@ -206,6 +223,13 @@ export const PayrollEngine: React.FC = () => {
     setUploadModalOpen(true);
   };
 
+  // Open Person-Specific Edit Modal
+  const handleOpenEditModal = (payslip: PayslipRecord) => {
+    setEditingRecord(JSON.parse(JSON.stringify(payslip)));
+    setEditFile(null);
+    setEditModalOpen(true);
+  };
+
   // Submit Upload Form
   const handleSubmitUpload = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -280,6 +304,26 @@ export const PayrollEngine: React.FC = () => {
     }
   };
 
+  // Submit Person-Specific Edit Form
+  const handleSubmitEdit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingRecord) return;
+    setIsSubmitting(true);
+    try {
+      await updatePayslip(editingRecord.id, editingRecord, editFile || undefined);
+      if (activePayslip && activePayslip.id === editingRecord.id) {
+        setActivePayslip({ ...activePayslip, ...editingRecord });
+      }
+      setEditModalOpen(false);
+      setEditingRecord(null);
+      setEditFile(null);
+    } catch (err) {
+      showToast('Failed to update payslip.', 'error');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
   // Replace File Handler
   const handleReplaceFileSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -305,7 +349,6 @@ export const PayrollEngine: React.FC = () => {
       document.body.removeChild(link);
       showToast(`Downloading ${payslip.fileName || 'payslip'}...`, 'info');
     } else {
-      // Fallback: Open viewer and prompt print/save as PDF
       setActivePayslip(payslip);
       setViewerTab('letterhead');
       showToast('Computerized payslip loaded. Click "Print / Save as PDF" to download.', 'info');
@@ -375,7 +418,7 @@ export const PayrollEngine: React.FC = () => {
               ₹
             </div>
             <h2 className="text-xl font-black text-white">
-              {isSuperAdmin ? 'Super Admin Payslip Management & Payroll Vault' : 'My Payslips & Compensation Portal'}
+              {isSuperAdmin ? 'Super Admin Payslip Management & Person Customization' : 'My Payslips & Compensation Portal'}
             </h2>
             <span className="px-2.5 py-0.5 rounded-full bg-amber-500/20 text-amber-400 text-xs font-mono font-bold border border-amber-500/30">
               {selectedYearFilter}
@@ -383,7 +426,7 @@ export const PayrollEngine: React.FC = () => {
           </div>
           <p className="text-xs text-slate-400 max-w-2xl">
             {isSuperAdmin
-              ? 'Upload, manage, preview, replace, and disburse statutory employee payslips (PDF, JPG, PNG) with automated EPF (12%), ESIC, PT, and CTC computations.'
+              ? 'Upload, edit individual person salary components, replace files, and manage statutory employee payslips (PDF, JPG, PNG) with full customization.'
               : `Official computerized wage slips for ${currentUser?.name || 'Employee'}. View and download your monthly compensation and statutory contribution records.`}
           </p>
         </div>
@@ -677,6 +720,15 @@ export const PayrollEngine: React.FC = () => {
                         {/* Super Admin Exclusive Controls */}
                         {isSuperAdmin && (
                           <>
+                            {/* Person-Specific Edit Payslip Button */}
+                            <button
+                              onClick={() => handleOpenEditModal(payslip)}
+                              className="p-1.5 rounded-lg bg-amber-500/10 hover:bg-amber-500/30 text-amber-400 hover:text-amber-300 border border-amber-500/30 transition-all cursor-pointer"
+                              title="Edit Person Payslip Details & Salary"
+                            >
+                              <Edit2 className="w-3.5 h-3.5" />
+                            </button>
+
                             {/* Replace File Button */}
                             <button
                               onClick={() => {
@@ -974,7 +1026,342 @@ export const PayrollEngine: React.FC = () => {
       )}
 
       {/* ========================================================================= */}
-      {/* MODAL 2: SUPER ADMIN REPLACE FILE MODAL                                    */}
+      {/* MODAL 2: PERSON-SPECIFIC PAYSLIP EDITOR MODAL (SUPER ADMIN ONLY)           */}
+      {/* ========================================================================= */}
+      {editModalOpen && editingRecord && editTotals && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/85 backdrop-blur-md animate-in fade-in overflow-y-auto">
+          <div className="bg-[#0b1329] border border-amber-500/40 rounded-3xl w-full max-w-4xl shadow-2xl p-6 sm:p-8 space-y-6 my-8 max-h-[90vh] overflow-y-auto">
+            {/* Header */}
+            <div className="flex items-center justify-between pb-4 border-b border-[#1f2f58]">
+              <div className="flex items-center gap-3">
+                <div className="w-11 h-11 rounded-2xl bg-amber-500/20 text-amber-400 flex items-center justify-center border border-amber-500/30 font-black text-xl">
+                  {editingRecord.employeeName.charAt(0)}
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h3 className="text-base font-bold text-white">
+                      Edit Payslip for {editingRecord.employeeName}
+                    </h3>
+                    <span className="px-2 py-0.5 rounded bg-amber-500/20 text-amber-400 font-mono text-xs font-bold border border-amber-500/30">
+                      {editingRecord.employeeId}
+                    </span>
+                    <span className="px-2 py-0.5 rounded bg-slate-900 text-slate-300 text-xs font-bold border border-slate-700">
+                      {editingRecord.monthYear}
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-400">
+                    Customize person-specific salary components, working days, bank particulars, and statutory deductions.
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setEditModalOpen(false)}
+                className="p-1.5 rounded-xl text-slate-400 hover:text-white bg-slate-900 border border-[#1f2f58] cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSubmitEdit} className="space-y-6">
+              {/* Section 1: Employee Particulars & Identification */}
+              <div className="space-y-3 bg-[#070e1e] p-5 rounded-2xl border border-[#1f2f58]">
+                <h4 className="text-xs font-bold text-amber-400 uppercase tracking-wider flex items-center gap-1.5">
+                  <User className="w-3.5 h-3.5" />
+                  1. Person Details & Employment Identity
+                </h4>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+                  <div>
+                    <label className="block text-slate-400 text-[10px] uppercase font-bold mb-1">Employee Full Name</label>
+                    <input
+                      type="text"
+                      value={editingRecord.employeeName}
+                      onChange={(e) => setEditingRecord({ ...editingRecord, employeeName: e.target.value })}
+                      className="w-full bg-[#0b1329] border border-[#1f2f58] rounded-xl px-3 py-2 text-white font-semibold focus:border-amber-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-slate-400 text-[10px] uppercase font-bold mb-1">Designation</label>
+                    <input
+                      type="text"
+                      value={editingRecord.designation}
+                      onChange={(e) => setEditingRecord({ ...editingRecord, designation: e.target.value })}
+                      className="w-full bg-[#0b1329] border border-[#1f2f58] rounded-xl px-3 py-2 text-white focus:border-amber-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-slate-400 text-[10px] uppercase font-bold mb-1">Assigned Client Site</label>
+                    <input
+                      type="text"
+                      value={editingRecord.siteName}
+                      onChange={(e) => setEditingRecord({ ...editingRecord, siteName: e.target.value })}
+                      className="w-full bg-[#0b1329] border border-[#1f2f58] rounded-xl px-3 py-2 text-white focus:border-amber-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-slate-400 text-[10px] uppercase font-bold mb-1">Bank Account No.</label>
+                    <input
+                      type="text"
+                      value={editingRecord.bankAc}
+                      onChange={(e) => setEditingRecord({ ...editingRecord, bankAc: e.target.value })}
+                      className="w-full bg-[#0b1329] border border-[#1f2f58] rounded-xl px-3 py-2 text-white font-mono focus:border-amber-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-slate-400 text-[10px] uppercase font-bold mb-1">IFSC Code</label>
+                    <input
+                      type="text"
+                      value={editingRecord.ifsc}
+                      onChange={(e) => setEditingRecord({ ...editingRecord, ifsc: e.target.value })}
+                      className="w-full bg-[#0b1329] border border-[#1f2f58] rounded-xl px-3 py-2 text-white font-mono focus:border-amber-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-slate-400 text-[10px] uppercase font-bold mb-1">EPFO UAN</label>
+                    <input
+                      type="text"
+                      value={editingRecord.uan}
+                      onChange={(e) => setEditingRecord({ ...editingRecord, uan: e.target.value })}
+                      className="w-full bg-[#0b1329] border border-[#1f2f58] rounded-xl px-3 py-2 text-white font-mono focus:border-amber-500"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* Section 2: Attendance & Working Days Particulars */}
+              <div className="space-y-3 bg-[#070e1e] p-5 rounded-2xl border border-[#1f2f58]">
+                <h4 className="text-xs font-bold text-sky-400 uppercase tracking-wider flex items-center gap-1.5">
+                  <Calendar className="w-3.5 h-3.5" />
+                  2. Attendance Days for {editingRecord.monthYear}
+                </h4>
+                <div className="grid grid-cols-3 gap-3 text-xs">
+                  <div>
+                    <label className="block text-slate-400 text-[10px] uppercase font-bold mb-1">Total Month Working Days</label>
+                    <input
+                      type="number"
+                      value={editingRecord.workingDays}
+                      onChange={(e) => setEditingRecord({ ...editingRecord, workingDays: Number(e.target.value) || 0 })}
+                      className="w-full bg-[#0b1329] border border-[#1f2f58] rounded-xl px-3 py-2 text-white font-mono focus:border-sky-400"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-slate-400 text-[10px] uppercase font-bold mb-1">Present / Paid Days</label>
+                    <input
+                      type="number"
+                      value={editingRecord.presentDays}
+                      onChange={(e) => setEditingRecord({ ...editingRecord, presentDays: Number(e.target.value) || 0 })}
+                      className="w-full bg-[#0b1329] border border-[#1f2f58] rounded-xl px-3 py-2 text-emerald-400 font-bold font-mono focus:border-emerald-400"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-slate-400 text-[10px] uppercase font-bold mb-1">Loss of Pay (LOP) Days</label>
+                    <input
+                      type="number"
+                      value={editingRecord.lopDays}
+                      onChange={(e) => setEditingRecord({ ...editingRecord, lopDays: Number(e.target.value) || 0 })}
+                      className="w-full bg-[#0b1329] border border-[#1f2f58] rounded-xl px-3 py-2 text-rose-400 font-mono focus:border-rose-400"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* Section 3: Salary Components & Live Breakdown */}
+              <div className="space-y-3 bg-[#070e1e] p-5 rounded-2xl border border-[#1f2f58]">
+                <h4 className="text-xs font-bold text-amber-400 uppercase tracking-wider flex items-center gap-1.5">
+                  <Sparkles className="w-3.5 h-3.5" />
+                  3. Earnings, Allowances & Deductions
+                </h4>
+
+                {/* Earnings */}
+                <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 text-xs">
+                  <div>
+                    <label className="block text-slate-400 text-[10px] uppercase font-bold mb-1">Basic (₹)</label>
+                    <input
+                      type="number"
+                      value={editingRecord.basicSalary}
+                      onChange={(e) => setEditingRecord({ ...editingRecord, basicSalary: Number(e.target.value) || 0 })}
+                      className="w-full bg-[#0b1329] border border-[#1f2f58] rounded-xl px-2.5 py-1.5 text-white font-mono text-xs focus:border-amber-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-slate-400 text-[10px] uppercase font-bold mb-1">VDA (₹)</label>
+                    <input
+                      type="number"
+                      value={editingRecord.vda}
+                      onChange={(e) => setEditingRecord({ ...editingRecord, vda: Number(e.target.value) || 0 })}
+                      className="w-full bg-[#0b1329] border border-[#1f2f58] rounded-xl px-2.5 py-1.5 text-white font-mono text-xs focus:border-amber-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-slate-400 text-[10px] uppercase font-bold mb-1">HRA (₹)</label>
+                    <input
+                      type="number"
+                      value={editingRecord.hra}
+                      onChange={(e) => setEditingRecord({ ...editingRecord, hra: Number(e.target.value) || 0 })}
+                      className="w-full bg-[#0b1329] border border-[#1f2f58] rounded-xl px-2.5 py-1.5 text-white font-mono text-xs focus:border-amber-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-slate-400 text-[10px] uppercase font-bold mb-1">Washing (₹)</label>
+                    <input
+                      type="number"
+                      value={editingRecord.washingAllowance}
+                      onChange={(e) => setEditingRecord({ ...editingRecord, washingAllowance: Number(e.target.value) || 0 })}
+                      className="w-full bg-[#0b1329] border border-[#1f2f58] rounded-xl px-2.5 py-1.5 text-white font-mono text-xs focus:border-amber-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-slate-400 text-[10px] uppercase font-bold mb-1">Other (₹)</label>
+                    <input
+                      type="number"
+                      value={editingRecord.otherAllowances}
+                      onChange={(e) => setEditingRecord({ ...editingRecord, otherAllowances: Number(e.target.value) || 0 })}
+                      className="w-full bg-[#0b1329] border border-[#1f2f58] rounded-xl px-2.5 py-1.5 text-white font-mono text-xs focus:border-amber-500"
+                    />
+                  </div>
+                </div>
+
+                {/* Deductions & Employer Contributions */}
+                <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 text-xs pt-2 border-t border-[#1f2f58]/50">
+                  <div>
+                    <label className="block text-slate-400 text-[10px] uppercase font-bold mb-1">Emp. PF (₹)</label>
+                    <input
+                      type="number"
+                      value={editingRecord.epfDeduction}
+                      onChange={(e) => setEditingRecord({ ...editingRecord, epfDeduction: Number(e.target.value) || 0 })}
+                      className="w-full bg-[#0b1329] border border-[#1f2f58] rounded-xl px-2.5 py-1.5 text-rose-400 font-mono text-xs focus:border-amber-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-slate-400 text-[10px] uppercase font-bold mb-1">Emp. ESI (₹)</label>
+                    <input
+                      type="number"
+                      value={editingRecord.esiDeduction}
+                      onChange={(e) => setEditingRecord({ ...editingRecord, esiDeduction: Number(e.target.value) || 0 })}
+                      className="w-full bg-[#0b1329] border border-[#1f2f58] rounded-xl px-2.5 py-1.5 text-rose-400 font-mono text-xs focus:border-amber-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-slate-400 text-[10px] uppercase font-bold mb-1">PT (₹)</label>
+                    <input
+                      type="number"
+                      value={editingRecord.ptDeduction}
+                      onChange={(e) => setEditingRecord({ ...editingRecord, ptDeduction: Number(e.target.value) || 0 })}
+                      className="w-full bg-[#0b1329] border border-[#1f2f58] rounded-xl px-2.5 py-1.5 text-rose-400 font-mono text-xs focus:border-amber-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-slate-400 text-[10px] uppercase font-bold mb-1">Other Deduct (₹)</label>
+                    <input
+                      type="number"
+                      value={editingRecord.otherDeductions}
+                      onChange={(e) => setEditingRecord({ ...editingRecord, otherDeductions: Number(e.target.value) || 0 })}
+                      className="w-full bg-[#0b1329] border border-[#1f2f58] rounded-xl px-2.5 py-1.5 text-rose-400 font-mono text-xs focus:border-amber-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-slate-400 text-[10px] uppercase font-bold mb-1">Employer PF (₹)</label>
+                    <input
+                      type="number"
+                      value={editingRecord.employerPf}
+                      onChange={(e) => setEditingRecord({ ...editingRecord, employerPf: Number(e.target.value) || 0 })}
+                      className="w-full bg-[#0b1329] border border-[#1f2f58] rounded-xl px-2.5 py-1.5 text-sky-400 font-mono text-xs focus:border-amber-500"
+                    />
+                  </div>
+                </div>
+
+                {/* Calculation Summary Highlight */}
+                <div className="grid grid-cols-4 gap-2 p-3.5 bg-slate-950 rounded-xl border border-[#1f2f58] text-center">
+                  <div>
+                    <span className="text-[10px] font-bold text-slate-400 block">Gross Salary (A)</span>
+                    <span className="font-mono font-bold text-white text-sm">₹{editTotals.grossSalary.toLocaleString('en-IN')}</span>
+                  </div>
+                  <div>
+                    <span className="text-[10px] font-bold text-sky-400 block">CTC (B)</span>
+                    <span className="font-mono font-bold text-sky-300 text-sm">₹{editTotals.ctc.toLocaleString('en-IN')}</span>
+                  </div>
+                  <div>
+                    <span className="text-[10px] font-bold text-rose-400 block">Deductions (C)</span>
+                    <span className="font-mono font-bold text-rose-400 text-sm">₹{editTotals.totalDeductions.toLocaleString('en-IN')}</span>
+                  </div>
+                  <div className="bg-amber-500/10 rounded-lg p-1 border border-amber-500/30">
+                    <span className="text-[10px] font-bold text-amber-400 block">Net Take-Home (A-C)</span>
+                    <span className="font-mono font-black text-amber-300 text-base">₹{editTotals.netPay.toLocaleString('en-IN')}</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Section 4: File & Status Particulars */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 bg-[#070e1e] p-4 rounded-2xl border border-[#1f2f58] text-xs">
+                <div>
+                  <label className="block text-slate-400 text-[10px] uppercase font-bold mb-1">Attached Payslip File</label>
+                  <div className="flex items-center gap-2">
+                    <span className="font-mono text-slate-300 truncate">{editingRecord.fileName || 'Computerized'}</span>
+                    <button
+                      type="button"
+                      onClick={() => editFileInputRef.current?.click()}
+                      className="px-2.5 py-1 rounded-lg bg-slate-900 border border-[#1f2f58] text-[11px] font-bold text-sky-400 hover:text-white cursor-pointer"
+                    >
+                      {editFile ? 'File Selected' : 'Choose Replacement'}
+                    </button>
+                    <input
+                      type="file"
+                      ref={editFileInputRef}
+                      onChange={(e) => {
+                        const file = e.target.files?.[0];
+                        if (file) setEditFile(file);
+                      }}
+                      accept=".pdf, .jpg, .jpeg, .png"
+                      className="hidden"
+                    />
+                  </div>
+                  {editFile && <p className="text-[10px] text-emerald-400 font-mono mt-1">New: {editFile.name}</p>}
+                </div>
+
+                <div>
+                  <label className="block text-slate-400 text-[10px] uppercase font-bold mb-1">Disbursal Status</label>
+                  <select
+                    value={editingRecord.status}
+                    onChange={(e) => setEditingRecord({ ...editingRecord, status: e.target.value as any })}
+                    className="w-full bg-[#0b1329] border border-[#1f2f58] rounded-xl px-3 py-2 text-white font-bold cursor-pointer"
+                  >
+                    <option value="Disbursed">Disbursed (Disbursal Confirmed)</option>
+                    <option value="Approved">Approved (Awaiting NEFT Bank Run)</option>
+                    <option value="Processed">Processed (Draft Mode)</option>
+                  </select>
+                </div>
+              </div>
+
+              {/* Action Buttons */}
+              <div className="pt-3 border-t border-[#1f2f58] flex items-center justify-end gap-3">
+                <button
+                  type="button"
+                  onClick={() => setEditModalOpen(false)}
+                  className="px-4 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-300 font-bold text-xs cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSubmitting}
+                  className="px-6 py-2.5 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-slate-950 rounded-xl font-extrabold text-xs shadow-gold-sm flex items-center gap-2 cursor-pointer"
+                >
+                  {isSubmitting ? (
+                    <span>Saving Changes...</span>
+                  ) : (
+                    <>
+                      <Save className="w-4 h-4" />
+                      <span>Save & Update Person Payslip</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================= */}
+      {/* MODAL 3: SUPER ADMIN REPLACE FILE MODAL                                    */}
       {/* ========================================================================= */}
       {replaceModalOpen && targetReplaceRecord && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/85 backdrop-blur-md animate-in fade-in">
@@ -1035,7 +1422,7 @@ export const PayrollEngine: React.FC = () => {
       )}
 
       {/* ========================================================================= */}
-      {/* MODAL 3: DELETE CONFIRMATION MODAL                                         */}
+      {/* MODAL 4: DELETE CONFIRMATION MODAL                                         */}
       {/* ========================================================================= */}
       {deleteConfirmId && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/85 backdrop-blur-md animate-in fade-in">
@@ -1069,7 +1456,7 @@ export const PayrollEngine: React.FC = () => {
       )}
 
       {/* ========================================================================= */}
-      {/* MODAL 4: UNIVERSAL HIGH-FIDELITY PAYSLIP VIEWER & PRINT MODAL              */}
+      {/* MODAL 5: UNIVERSAL HIGH-FIDELITY PAYSLIP VIEWER & PRINT MODAL              */}
       {/* ========================================================================= */}
       {activePayslip && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/90 backdrop-blur-md animate-in fade-in overflow-y-auto">
@@ -1103,6 +1490,21 @@ export const PayrollEngine: React.FC = () => {
                       Attached Document
                     </button>
                   </div>
+                )}
+
+                {/* Edit Button for Super Admin directly inside viewer */}
+                {isSuperAdmin && (
+                  <button
+                    onClick={() => {
+                      const cur = activePayslip;
+                      setActivePayslip(null);
+                      handleOpenEditModal(cur);
+                    }}
+                    className="px-3 py-1.5 rounded-xl bg-amber-500/20 hover:bg-amber-500 text-amber-900 hover:text-slate-950 font-bold text-xs flex items-center gap-1.5 border border-amber-500/40 cursor-pointer transition-all"
+                  >
+                    <Edit2 className="w-3.5 h-3.5" />
+                    <span>Edit Particulars</span>
+                  </button>
                 )}
 
                 <button
