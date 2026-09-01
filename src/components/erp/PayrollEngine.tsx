@@ -269,8 +269,7 @@ export const PayrollEngine: React.FC = () => {
         aadhar,
         status: 'Disbursed',
         disbursedOn: new Date().toISOString().split('T')[0],
-        remarks: salaryInputs.remarks,
-        file: selectedFile || undefined
+        remarks: salaryInputs.remarks
       });
 
       setUploadModalOpen(false);
