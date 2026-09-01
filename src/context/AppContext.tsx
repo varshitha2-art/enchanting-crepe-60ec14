@@ -12,6 +12,7 @@ import {
   AttendanceRecord,
   LeaveRequest,
   PayrollRecord,
+  PayslipRecord,
   UserPermissions
 } from '../types';
 import {
@@ -24,6 +25,7 @@ import {
   INITIAL_COMPANY_SETTINGS,
   INITIAL_LEAVES
 } from '../data/initialData';
+import { INITIAL_PAYSLIPS, calculateSalarySummary } from '../data/initialPayslips';
 
 export const DEFAULT_ROLE_PERMISSIONS: Record<Role, UserPermissions> = {
   SUPER_ADMIN: {
