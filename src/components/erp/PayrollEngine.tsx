@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import { useApp } from '../../context/AppContext';
 import {
   Receipt,
@@ -14,345 +14,959 @@ import {
   Sparkles,
   Edit2,
   Upload,
-  Save
+  Save,
+  Trash2,
+  FileText,
+  Image as ImageIcon,
+  Eye,
+  RefreshCw,
+  Filter,
+  Plus,
+  Calendar,
+  AlertCircle,
+  Check,
+  Building2,
+  User,
+  Paperclip,
+  ExternalLink
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
-import { PayrollRecord } from '../../types';
+import { PayslipRecord, Role } from '../../types';
+import { calculateSalarySummary } from '../../data/initialPayslips';
 
 export const PayrollEngine: React.FC = () => {
-  const { payroll, processMonthlyPayroll, currentUser, companySettings, showToast } = useApp();
-  const role = currentUser?.role || 'EMPLOYEE';
+  const {
+    payslips,
+    uploadPayslip,
+    updatePayslip,
+    deletePayslip,
+    replacePayslipFile,
+    employees,
+    currentUser,
+    companySettings,
+    showToast,
+    processMonthlyPayroll
+  } = useApp();
 
+  const role: Role = currentUser?.role || 'EMPLOYEE';
+  const isSuperAdmin = role === 'SUPER_ADMIN' || role === 'HR_ADMIN';
+
+  // Sub-tabs for Admin: 'payslips' | 'batch'
+  const [adminTab, setAdminTab] = useState<'payslips' | 'batch'>('payslips');
+
+  // Filters
+  const [selectedEmpFilter, setSelectedEmpFilter] = useState<string>('all');
+  const [selectedMonthFilter, setSelectedMonthFilter] = useState<string>('all');
+  const [selectedYearFilter, setSelectedYearFilter] = useState<string>('2026');
   const [searchQuery, setSearchQuery] = useState('');
-  const [selectedMonth, setSelectedMonth] = useState('August 2026');
-  const [activePayslip, setActivePayslip] = useState<PayrollRecord | null>(null);
 
-  // Edit Payslip Modal State
-  const [editPayrollModalOpen, setEditPayrollModalOpen] = useState(false);
-  const [editingPayrollRecord, setEditingPayrollRecord] = useState<Partial<PayrollRecord>>({});
+  // Modals State
+  const [activePayslip, setActivePayslip] = useState<PayslipRecord | null>(null);
+  const [viewerTab, setViewerTab] = useState<'letterhead' | 'file'>('letterhead');
 
-  // Scoping
-  let scopedPayroll = payroll;
-  if (role === 'EMPLOYEE') {
-    scopedPayroll = payroll.filter(p => p.employeeId === currentUser?.employeeId || p.employeeName.toLowerCase() === currentUser?.name.toLowerCase());
-    if (scopedPayroll.length === 0 && payroll.length > 0) {
-      scopedPayroll = [payroll[0]];
-    }
-  }
+  const [uploadModalOpen, setUploadModalOpen] = useState(false);
+  const [replaceModalOpen, setReplaceModalOpen] = useState(false);
+  const [targetReplaceRecord, setTargetReplaceRecord] = useState<PayslipRecord | null>(null);
+  const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
 
-  const filteredPayroll = scopedPayroll.filter(p => {
-    const q = searchQuery.toLowerCase();
-    return (
-      p.employeeName.toLowerCase().includes(q) ||
-      p.employeeId.toLowerCase().includes(q) ||
-      p.siteName.toLowerCase().includes(q) ||
-      p.designation.toLowerCase().includes(q)
-    );
+  // Upload Form State
+  const [uploadEmpId, setUploadEmpId] = useState<string>('VPHS0040');
+  const [uploadMonth, setUploadMonth] = useState<string>('August');
+  const [uploadYear, setUploadYear] = useState<number>(2026);
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [filePreviewUrl, setFilePreviewUrl] = useState<string>('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  // Salary Breakdown Input State (Reference defaults from user prompt)
+  const [salaryInputs, setSalaryInputs] = useState({
+    basicSalary: 6000,
+    vda: 10000,
+    hra: 6783,
+    washingAllowance: 200,
+    otherAllowances: 650,
+    employerPf: 1800,
+    employerEsi: 520,
+    epfDeduction: 1800,
+    esiDeduction: 120,
+    ptDeduction: 200,
+    otherDeductions: 0,
+    workingDays: 26,
+    presentDays: 25,
+    lopDays: 1,
+    remarks: ''
   });
 
-  const totalDisbursed = filteredPayroll.reduce((acc, p) => acc + p.netPay, 0);
-  const totalEpf = filteredPayroll.reduce((acc, p) => acc + p.epfDeduction, 0);
-  const totalEsi = filteredPayroll.reduce((acc, p) => acc + p.esiDeduction, 0);
+  // Calculate live totals for the upload form
+  const liveTotals = calculateSalarySummary(
+    salaryInputs.basicSalary,
+    salaryInputs.vda,
+    salaryInputs.hra,
+    salaryInputs.washingAllowance,
+    salaryInputs.otherAllowances,
+    salaryInputs.epfDeduction,
+    salaryInputs.esiDeduction,
+    salaryInputs.ptDeduction,
+    salaryInputs.otherDeductions,
+    salaryInputs.employerPf,
+    salaryInputs.employerEsi
+  );
 
-  const handleExportPayroll = () => {
-    const exportRows = filteredPayroll.map((p, i) => ({
+  // Edit Payslip Modal State
+  const [editModalOpen, setEditModalOpen] = useState(false);
+  const [editingRecord, setEditingRecord] = useState<PayslipRecord | null>(null);
+
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const replaceFileInputRef = useRef<HTMLInputElement>(null);
+
+  // 1. Strict Scoping:
+  // If Employee, ONLY show payslips matching their employeeId / username
+  let scopedPayslips = payslips;
+  if (!isSuperAdmin) {
+    const userEmpId = (currentUser?.employeeId || currentUser?.username || '').toUpperCase().trim();
+    scopedPayslips = payslips.filter(p => p.employeeId.toUpperCase() === userEmpId);
+  }
+
+  // 2. Apply Filters & Search
+  const filteredPayslips = scopedPayslips.filter(p => {
+    // Employee filter (Admin only)
+    if (isSuperAdmin && selectedEmpFilter !== 'all' && p.employeeId.toUpperCase() !== selectedEmpFilter.toUpperCase()) {
+      return false;
+    }
+    // Month filter
+    if (selectedMonthFilter !== 'all' && p.month.toLowerCase() !== selectedMonthFilter.toLowerCase()) {
+      return false;
+    }
+    // Year filter
+    if (selectedYearFilter !== 'all' && p.year.toString() !== selectedYearFilter) {
+      return false;
+    }
+    // Search query
+    if (searchQuery.trim()) {
+      const q = searchQuery.toLowerCase().trim();
+      const match =
+        p.employeeName.toLowerCase().includes(q) ||
+        p.employeeId.toLowerCase().includes(q) ||
+        p.designation.toLowerCase().includes(q) ||
+        p.siteName.toLowerCase().includes(q) ||
+        p.monthYear.toLowerCase().includes(q);
+      if (!match) return false;
+    }
+    return true;
+  });
+
+  // KPI Metrics
+  const totalNetDisbursed = filteredPayslips.reduce((acc, p) => acc + (p.netPay || 0), 0);
+  const totalGrossDisbursed = filteredPayslips.reduce((acc, p) => acc + (p.grossSalary || 0), 0);
+  const totalEpf = filteredPayslips.reduce((acc, p) => acc + (p.epfDeduction || 0), 0);
+  const totalEsi = filteredPayslips.reduce((acc, p) => acc + (p.esiDeduction || 0), 0);
+
+  // Handle File Selection in Upload Modal
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      const validTypes = ['application/pdf', 'image/jpeg', 'image/jpg', 'image/png'];
+      if (!validTypes.includes(file.type) && !file.name.match(/\.(pdf|jpg|jpeg|png)$/i)) {
+        showToast('Please upload a valid PDF, JPG, JPEG, or PNG file.', 'error');
+        return;
+      }
+      setSelectedFile(file);
+      if (file.type.startsWith('image/')) {
+        const preview = URL.createObjectURL(file);
+        setFilePreviewUrl(preview);
+      } else {
+        setFilePreviewUrl('');
+      }
+    }
+  };
+
+  // Open Upload Modal
+  const handleOpenUploadModal = () => {
+    setSelectedFile(null);
+    setFilePreviewUrl('');
+    setUploadEmpId(employees[0]?.id || 'VPHS0040');
+    setUploadMonth('August');
+    setUploadYear(2026);
+    setSalaryInputs({
+      basicSalary: 6000,
+      vda: 10000,
+      hra: 6783,
+      washingAllowance: 200,
+      otherAllowances: 650,
+      employerPf: 1800,
+      employerEsi: 520,
+      epfDeduction: 1800,
+      esiDeduction: 120,
+      ptDeduction: 200,
+      otherDeductions: 0,
+      workingDays: 26,
+      presentDays: 25,
+      lopDays: 1,
+      remarks: ''
+    });
+    setUploadModalOpen(true);
+  };
+
+  // Submit Upload Form
+  const handleSubmitUpload = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!uploadEmpId) {
+      showToast('Please select an employee.', 'error');
+      return;
+    }
+
+    const emp = employees.find(e => e.id.toUpperCase() === uploadEmpId.toUpperCase());
+    const empName = emp?.name || `Employee ${uploadEmpId}`;
+    const desig = emp?.designation || 'Valet Operations Associate';
+    const dept = emp?.department || 'Facility Management';
+    const site = emp?.siteUnit || 'Microsoft India (R & D) Pvt. Ltd';
+    const bankAc = emp?.bankAc || '921020048291039';
+    const ifsc = emp?.ifsc || 'HDFC0000240';
+    const bankName = emp?.bankName || 'HDFC Bank Ltd.';
+    const uan = emp?.uan || '101928472910';
+    const pfNo = emp?.pfNo || 'TS/HYD/10928/042';
+    const esiNo = emp?.esiNo || '52000849201920';
+    const pan = emp?.pan || 'ABCDE1234F';
+    const aadhar = emp?.aadhar || '4829 1029 4819';
+
+    setIsSubmitting(true);
+    try {
+      await uploadPayslip({
+        employeeId: uploadEmpId,
+        employeeName: empName,
+        designation: desig,
+        department: dept,
+        siteName: site,
+        month: uploadMonth,
+        year: uploadYear,
+        monthYear: `${uploadMonth} ${uploadYear}`,
+        file: selectedFile || undefined,
+        fileType: selectedFile?.name.endsWith('.pdf') ? 'PDF' : selectedFile ? 'PNG' : 'DOCUMENT',
+        workingDays: salaryInputs.workingDays,
+        presentDays: salaryInputs.presentDays,
+        lopDays: salaryInputs.lopDays,
+        basicSalary: salaryInputs.basicSalary,
+        vda: salaryInputs.vda,
+        hra: salaryInputs.hra,
+        washingAllowance: salaryInputs.washingAllowance,
+        otherAllowances: salaryInputs.otherAllowances,
+        grossSalary: liveTotals.grossSalary,
+        employerPf: liveTotals.employerPf,
+        employerEsi: liveTotals.employerEsi,
+        ctc: liveTotals.ctc,
+        epfDeduction: liveTotals.epfDeduction,
+        esiDeduction: liveTotals.esiDeduction,
+        ptDeduction: liveTotals.ptDeduction,
+        otherDeductions: salaryInputs.otherDeductions,
+        totalDeductions: liveTotals.totalDeductions,
+        netPay: liveTotals.netPay,
+        bankAc,
+        ifsc,
+        bankName,
+        uan,
+        pfNo,
+        esiNo,
+        pan,
+        aadhar,
+        status: 'Disbursed',
+        disbursedOn: new Date().toISOString().split('T')[0],
+        remarks: salaryInputs.remarks,
+        file: selectedFile || undefined
+      });
+
+      setUploadModalOpen(false);
+    } catch (err) {
+      showToast('Failed to upload payslip. Please try again.', 'error');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  // Replace File Handler
+  const handleReplaceFileSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!targetReplaceRecord) return;
+    const file = replaceFileInputRef.current?.files?.[0];
+    if (!file) {
+      showToast('Please select a replacement file.', 'error');
+      return;
+    }
+    await replacePayslipFile(targetReplaceRecord.id, file);
+    setReplaceModalOpen(false);
+    setTargetReplaceRecord(null);
+  };
+
+  // Download Handler
+  const handleDownload = (payslip: PayslipRecord) => {
+    if (payslip.fileUrl) {
+      const link = document.createElement('a');
+      link.href = payslip.fileUrl;
+      link.download = payslip.fileName || `VPHS_Payslip_${payslip.employeeId}_${payslip.month}_${payslip.year}`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      showToast(`Downloading ${payslip.fileName || 'payslip'}...`, 'info');
+    } else {
+      // Fallback: Open viewer and prompt print/save as PDF
+      setActivePayslip(payslip);
+      setViewerTab('letterhead');
+      showToast('Computerized payslip loaded. Click "Print / Save as PDF" to download.', 'info');
+    }
+  };
+
+  // Print Handler
+  const handlePrint = () => {
+    window.print();
+  };
+
+  // Export Bank NEFT XLSX
+  const handleExportBankSheet = () => {
+    const exportRows = filteredPayslips.map((p, i) => ({
       'S.No': i + 1,
-      'Month': p.month,
+      'Month': p.monthYear,
       'Emp ID': p.employeeId,
       'Employee Name': p.employeeName,
       'Designation': p.designation,
       'Client Site': p.siteName,
       'Bank Account': p.bankAc,
       'IFSC': p.ifsc,
+      'Bank Name': p.bankName,
+      'UAN': p.uan,
       'Days Worked': p.presentDays,
       'Basic': p.basicSalary,
+      'VDA': p.vda,
       'HRA': p.hra,
-      'Allowances': p.allowances,
-      'Gross Salary': p.grossSalary,
-      'EPF (12%)': p.epfDeduction,
-      'ESIC (0.75%)': p.esiDeduction,
+      'Washing Allowance': p.washingAllowance,
+      'Other Allowances': p.otherAllowances,
+      'Gross Salary (A)': p.grossSalary,
+      'Employer PF': p.employerPf,
+      'Employer ESI': p.employerEsi,
+      'CTC (B)': p.ctc,
+      'Employee PF': p.epfDeduction,
+      'Employee ESI': p.esiDeduction,
       'PT': p.ptDeduction,
-      'Total Deductions': p.totalDeductions,
-      'Net Pay': p.netPay,
-      'Status': p.status
+      'Total Deductions (C)': p.totalDeductions,
+      'Net Take-Home Pay (A-C)': p.netPay,
+      'Disbursal Status': p.status,
+      'Disbursed Date': p.disbursedOn || '2026-08-31',
+      'Attached File': p.fileName || 'Computerized Slip'
     }));
 
     const ws = XLSX.utils.json_to_sheet(exportRows);
     const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'Payroll Summary');
-    XLSX.writeFile(wb, `VPHS_Payroll_${selectedMonth.replace(/\s+/g, '_')}.xlsx`);
-    showToast(`Exported payroll sheet for ${selectedMonth}!`, 'success');
+    XLSX.utils.book_append_sheet(wb, ws, 'VPHS Salary Disbursals');
+    XLSX.writeFile(wb, `VPHS_NEFT_Payroll_Sheet_${selectedYearFilter}.xlsx`);
+    showToast('Exported official Bank Transfer Sheet (XLSX)!', 'success');
   };
 
-  // Upload Monthly Payroll Spreadsheet
-  const handleUploadPayrollSheet = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files;
-    if (!files || files.length === 0) return;
-    showToast(`Successfully processed payroll file: ${files[0].name}`, 'success');
-  };
-
-  const handleSaveEditedPayroll = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (editingPayrollRecord.id) {
-      showToast(`Updated payroll details for ${editingPayrollRecord.employeeName}`, 'success');
-      setEditPayrollModalOpen(false);
-    }
-  };
-
-  const handlePrint = () => {
-    window.print();
-  };
+  // Months List
+  const MONTH_NAMES = [
+    'January', 'February', 'March', 'April', 'May', 'June',
+    'July', 'August', 'September', 'October', 'November', 'December'
+  ];
 
   return (
     <div className="space-y-6">
-      {/* Top Controls & Metrics */}
-      <div className="bg-[#0b1329] border border-[#1f2f58] rounded-2xl p-6 shadow-xl flex flex-col lg:flex-row items-start lg:items-center justify-between gap-6">
-        <div>
+      {/* 1. Header Banner & Action Bar */}
+      <div className="bg-[#0b1329] border border-[#1f2f58] rounded-3xl p-6 shadow-xl flex flex-col lg:flex-row items-start lg:items-center justify-between gap-6 relative overflow-hidden">
+        <div className="absolute right-0 top-0 bottom-0 w-96 bg-amber-500/5 rounded-full blur-3xl pointer-events-none"></div>
+
+        <div className="space-y-1.5 relative z-10">
           <div className="flex items-center gap-2">
-            <h2 className="text-lg font-bold text-white">Statutory Payroll & Payslip Engine</h2>
+            <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-amber-500 to-amber-300 flex items-center justify-center text-slate-950 font-black text-lg shadow-md shadow-amber-500/20">
+              ₹
+            </div>
+            <h2 className="text-xl font-black text-white">
+              {isSuperAdmin ? 'Super Admin Payslip Management & Payroll Vault' : 'My Payslips & Compensation Portal'}
+            </h2>
             <span className="px-2.5 py-0.5 rounded-full bg-amber-500/20 text-amber-400 text-xs font-mono font-bold border border-amber-500/30">
-              {selectedMonth}
+              {selectedYearFilter}
             </span>
           </div>
-          <p className="text-xs text-slate-400 mt-1">
-            Automated statutory deductions: EPF (12%), ESIC (0.75%), Professional Tax (PT), and computerized PDF wage slips.
+          <p className="text-xs text-slate-400 max-w-2xl">
+            {isSuperAdmin
+              ? 'Upload, manage, preview, replace, and disburse statutory employee payslips (PDF, JPG, PNG) with automated EPF (12%), ESIC, PT, and CTC computations.'
+              : `Official computerized wage slips for ${currentUser?.name || 'Employee'}. View and download your monthly compensation and statutory contribution records.`}
           </p>
         </div>
 
-        <div className="flex flex-wrap items-center gap-3">
-          {role !== 'EMPLOYEE' && (
+        {/* Action Controls */}
+        <div className="flex flex-wrap items-center gap-3 relative z-10">
+          {isSuperAdmin && (
             <>
-              <label className="px-3.5 py-2 bg-slate-900 hover:bg-slate-800 text-slate-200 border border-[#1f2f58] rounded-xl text-xs font-semibold flex items-center gap-1.5 cursor-pointer shadow transition-all">
-                <Upload className="w-3.5 h-3.5 text-amber-400" />
-                <span>Upload Payroll Sheet</span>
-                <input type="file" accept=".xlsx, .xls, .csv" onChange={handleUploadPayrollSheet} className="hidden" />
-              </label>
+              <button
+                onClick={handleOpenUploadModal}
+                className="px-4 py-2.5 bg-gradient-to-r from-amber-500 via-amber-400 to-amber-500 hover:from-amber-400 hover:to-amber-300 text-slate-950 rounded-xl font-extrabold text-xs shadow-gold-sm transition-all hover:scale-105 flex items-center gap-2 cursor-pointer"
+              >
+                <Upload className="w-4 h-4" />
+                <span>Upload Employee Payslip</span>
+              </button>
 
               <button
-                onClick={() => processMonthlyPayroll(selectedMonth)}
-                className="px-4 py-2.5 bg-amber-500 hover:bg-amber-400 text-slate-950 rounded-xl font-extrabold text-xs shadow-md shadow-amber-500/20 transition-all hover:scale-105 flex items-center gap-1.5"
+                onClick={handleExportBankSheet}
+                className="px-3.5 py-2.5 bg-slate-900 hover:bg-slate-800 text-slate-200 border border-[#1f2f58] rounded-xl text-xs font-semibold flex items-center gap-1.5 shadow transition-all cursor-pointer"
               >
-                <Sparkles className="w-4 h-4" />
-                <span>Run Payroll Batch</span>
+                <Download className="w-4 h-4 text-emerald-400" />
+                <span>Bank NEFT Sheet (XLSX)</span>
               </button>
             </>
           )}
 
-          <button
-            onClick={handleExportPayroll}
-            className="px-4 py-2.5 bg-slate-900 hover:bg-slate-800 text-slate-200 border border-[#1f2f58] rounded-xl text-xs font-semibold flex items-center gap-1.5 shadow"
-          >
-            <Download className="w-4 h-4 text-emerald-400" />
-            <span>Bank Transfer Sheet (XLSX)</span>
-          </button>
+          {!isSuperAdmin && filteredPayslips.length > 0 && (
+            <button
+              onClick={() => handleDownload(filteredPayslips[0])}
+              className="px-4 py-2.5 bg-amber-500 hover:bg-amber-400 text-slate-950 rounded-xl font-bold text-xs flex items-center gap-1.5 shadow cursor-pointer transition-all hover:scale-105"
+            >
+              <Download className="w-4 h-4" />
+              <span>Download Latest Payslip</span>
+            </button>
+          )}
         </div>
       </div>
 
-      {/* Summary KPI Cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-        <div className="p-5 rounded-2xl bg-[#0b1329] border border-[#1f2f58] space-y-1.5">
-          <span className="text-xs font-bold text-amber-400 uppercase tracking-wider">Total Net Salary Disbursal</span>
-          <div className="text-2xl font-black text-white font-mono">₹{totalDisbursed.toLocaleString('en-IN')}</div>
-          <p className="text-[11px] text-slate-400">{filteredPayroll.length} Processed Staff Accounts</p>
-        </div>
-        <div className="p-5 rounded-2xl bg-[#0b1329] border border-[#1f2f58] space-y-1.5">
-          <span className="text-xs font-bold text-sky-400 uppercase tracking-wider">Total EPFO Remittance (12%)</span>
-          <div className="text-2xl font-black text-white font-mono">₹{totalEpf.toLocaleString('en-IN')}</div>
-          <p className="text-[11px] text-slate-400">EPFO Code: {companySettings.epfoCode}</p>
-        </div>
-        <div className="p-5 rounded-2xl bg-[#0b1329] border border-[#1f2f58] space-y-1.5">
-          <span className="text-xs font-bold text-emerald-400 uppercase tracking-wider">Total ESIC Remittance (0.75%)</span>
-          <div className="text-2xl font-black text-white font-mono">₹{totalEsi.toLocaleString('en-IN')}</div>
-          <p className="text-[11px] text-slate-400">ESIC Code: {companySettings.esicCode}</p>
-        </div>
-      </div>
+      {/* 2. Super Admin Metric Cards */}
+      {isSuperAdmin && (
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          <div className="p-5 rounded-2xl bg-[#0b1329] border border-[#1f2f58] space-y-1 shadow">
+            <span className="text-[11px] font-bold text-amber-400 uppercase tracking-wider block">Uploaded Payslips</span>
+            <div className="text-2xl font-black text-white font-mono">{filteredPayslips.length} Records</div>
+            <p className="text-[11px] text-slate-400">{employees.length} Authorized Staff Accounts</p>
+          </div>
 
-      {/* Search Bar */}
-      <div className="bg-[#0b1329] border border-[#1f2f58] rounded-2xl p-4 shadow flex items-center justify-between">
-        <div className="relative w-full sm:w-80">
+          <div className="p-5 rounded-2xl bg-[#0b1329] border border-[#1f2f58] space-y-1 shadow">
+            <span className="text-[11px] font-bold text-emerald-400 uppercase tracking-wider block">Net Take-Home Disbursed</span>
+            <div className="text-2xl font-black text-emerald-300 font-mono">₹{totalNetDisbursed.toLocaleString('en-IN')}</div>
+            <p className="text-[11px] text-slate-400">Total Gross: ₹{totalGrossDisbursed.toLocaleString('en-IN')}</p>
+          </div>
+
+          <div className="p-5 rounded-2xl bg-[#0b1329] border border-[#1f2f58] space-y-1 shadow">
+            <span className="text-[11px] font-bold text-sky-400 uppercase tracking-wider block">Total EPFO Remittance</span>
+            <div className="text-2xl font-black text-sky-300 font-mono">₹{totalEpf.toLocaleString('en-IN')}</div>
+            <p className="text-[11px] text-slate-400 font-mono">EPF Code: {companySettings.epfoCode}</p>
+          </div>
+
+          <div className="p-5 rounded-2xl bg-[#0b1329] border border-[#1f2f58] space-y-1 shadow">
+            <span className="text-[11px] font-bold text-purple-400 uppercase tracking-wider block">Total ESIC Remittance</span>
+            <div className="text-2xl font-black text-purple-300 font-mono">₹{totalEsi.toLocaleString('en-IN')}</div>
+            <p className="text-[11px] text-slate-400 font-mono">ESIC Code: {companySettings.esicCode}</p>
+          </div>
+        </div>
+      )}
+
+      {/* 3. Employee Self-Service Header Card (When Logged in as Employee) */}
+      {!isSuperAdmin && (
+        <div className="bg-gradient-to-r from-[#111c38] via-[#152244] to-[#0b1329] border border-[#1f2f58] rounded-3xl p-6 shadow-xl flex flex-col md:flex-row items-start md:items-center justify-between gap-6">
+          <div className="flex items-center gap-4">
+            <div className="w-14 h-14 rounded-2xl bg-amber-500/20 text-amber-400 flex items-center justify-center font-black text-2xl border border-amber-500/40">
+              {currentUser?.name?.charAt(0) || 'E'}
+            </div>
+            <div className="space-y-1">
+              <div className="flex items-center gap-2">
+                <span className="px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-400 font-mono text-xs font-bold border border-amber-500/30">
+                  {currentUser?.employeeId || currentUser?.username}
+                </span>
+                <span className="px-2 py-0.5 rounded-full bg-emerald-950 text-emerald-400 text-xs font-bold border border-emerald-500/30">
+                  ● Active Staff
+                </span>
+              </div>
+              <h3 className="text-xl font-black text-white">{currentUser?.name}</h3>
+              <p className="text-xs text-slate-300">
+                {currentUser?.designation || 'Valet Operations Associate'} • Site: <strong>{currentUser?.assignedSites?.[0] || 'Microsoft India (R & D) Pvt. Ltd'}</strong>
+              </p>
+            </div>
+          </div>
+
+          <div className="bg-[#070e1e] p-4 rounded-2xl border border-[#1f2f58] text-right space-y-1 min-w-[200px]">
+            <span className="text-[10px] font-bold text-amber-400 uppercase tracking-widest block">Latest Net Take-Home</span>
+            <div className="text-2xl font-black text-emerald-400 font-mono">
+              ₹{(filteredPayslips[0]?.netPay || 21513).toLocaleString('en-IN')}
+            </div>
+            <p className="text-[10px] text-slate-400">{filteredPayslips[0]?.monthYear || 'August 2026'}</p>
+          </div>
+        </div>
+      )}
+
+      {/* 4. Filters & Search Bar */}
+      <div className="bg-[#0b1329] border border-[#1f2f58] rounded-2xl p-4 shadow-lg flex flex-col md:flex-row items-stretch md:items-center justify-between gap-4">
+        <div className="flex flex-wrap items-center gap-3">
+          {/* Employee Selector (Super Admin Only) */}
+          {isSuperAdmin && (
+            <div className="flex items-center gap-1.5 bg-[#070e1e] border border-[#1f2f58] rounded-xl px-2.5 py-1.5">
+              <User className="w-3.5 h-3.5 text-amber-400" />
+              <select
+                value={selectedEmpFilter}
+                onChange={(e) => setSelectedEmpFilter(e.target.value)}
+                className="bg-transparent text-xs font-bold text-white focus:outline-none cursor-pointer"
+              >
+                <option value="all" className="bg-slate-900 text-white">All Employees ({employees.length})</option>
+                {employees.map(emp => (
+                  <option key={emp.id} value={emp.id} className="bg-slate-900 text-white">
+                    {emp.id} - {emp.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
+          {/* Month Selector */}
+          <div className="flex items-center gap-1.5 bg-[#070e1e] border border-[#1f2f58] rounded-xl px-2.5 py-1.5">
+            <Calendar className="w-3.5 h-3.5 text-sky-400" />
+            <select
+              value={selectedMonthFilter}
+              onChange={(e) => setSelectedMonthFilter(e.target.value)}
+              className="bg-transparent text-xs font-bold text-white focus:outline-none cursor-pointer"
+            >
+              <option value="all" className="bg-slate-900 text-white">All Months</option>
+              {MONTH_NAMES.map(m => (
+                <option key={m} value={m} className="bg-slate-900 text-white">{m}</option>
+              ))}
+            </select>
+          </div>
+
+          {/* Year Selector */}
+          <div className="flex items-center gap-1.5 bg-[#070e1e] border border-[#1f2f58] rounded-xl px-2.5 py-1.5">
+            <select
+              value={selectedYearFilter}
+              onChange={(e) => setSelectedYearFilter(e.target.value)}
+              className="bg-transparent text-xs font-bold text-white focus:outline-none cursor-pointer"
+            >
+              <option value="all" className="bg-slate-900 text-white">All Years</option>
+              <option value="2026" className="bg-slate-900 text-white">2026</option>
+              <option value="2025" className="bg-slate-900 text-white">2025</option>
+              <option value="2024" className="bg-slate-900 text-white">2024</option>
+            </select>
+          </div>
+        </div>
+
+        {/* Search Bar */}
+        <div className="relative w-full md:w-72">
           <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
           <input
             type="text"
-            placeholder="Search Employee, ID, or Site..."
+            placeholder="Search by ID, Name, Month..."
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            className="w-full bg-[#070e1e] border border-[#1f2f58] rounded-xl pl-9 pr-3 py-2 text-xs text-white focus:outline-none focus:border-amber-500"
+            className="w-full bg-[#070e1e] border border-[#1f2f58] rounded-xl pl-9 pr-3 py-2 text-xs text-white focus:outline-none focus:border-amber-500 font-medium"
           />
         </div>
-
-        <span className="text-xs text-slate-400 hidden sm:inline">
-          Showing <strong>{filteredPayroll.length}</strong> payslips for {selectedMonth}
-        </span>
       </div>
 
-      {/* Payroll Table */}
-      <div className="bg-[#0b1329] border border-[#1f2f58] rounded-2xl overflow-hidden shadow-xl">
+      {/* 5. Payslips Table & Cards */}
+      <div className="bg-[#0b1329] border border-[#1f2f58] rounded-3xl overflow-hidden shadow-2xl">
         <div className="overflow-x-auto">
           <table className="w-full text-left text-xs text-slate-300">
             <thead className="bg-[#070e1e] text-slate-400 font-bold uppercase text-[10px] tracking-wider border-b border-[#1f2f58]">
               <tr>
-                <th className="px-4 py-3.5">Emp ID & Name</th>
-                <th className="px-4 py-3.5">Designation</th>
-                <th className="px-4 py-3.5">Days</th>
-                <th className="px-4 py-3.5">Gross Pay</th>
-                <th className="px-4 py-3.5">EPF (12%)</th>
-                <th className="px-4 py-3.5">ESIC (0.75%)</th>
-                <th className="px-4 py-3.5">PT</th>
-                <th className="px-4 py-3.5">Net Pay</th>
+                <th className="px-4 py-3.5">Employee ID & Name</th>
+                <th className="px-4 py-3.5">Salary Period</th>
+                <th className="px-4 py-3.5">Gross (A)</th>
+                <th className="px-4 py-3.5">Deductions (C)</th>
+                <th className="px-4 py-3.5">Net Take-Home (A-C)</th>
+                <th className="px-4 py-3.5">Attached Payslip File</th>
+                <th className="px-4 py-3.5">Upload Date</th>
                 <th className="px-4 py-3.5 text-right">Actions</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-[#1f2f58]/60">
-              {filteredPayroll.map((p) => (
-                <tr key={p.id} className="hover:bg-slate-900/60 transition-colors">
-                  <td className="px-4 py-3">
-                    <div className="flex items-center gap-2">
-                      <span className="font-mono text-[10px] font-bold text-amber-400 bg-slate-950 px-1.5 py-0.5 rounded border border-amber-500/30">
-                        {p.employeeId}
-                      </span>
-                      <span className="font-bold text-white">{p.employeeName}</span>
-                    </div>
-                  </td>
-                  <td className="px-4 py-3 text-slate-300">{p.designation}</td>
-                  <td className="px-4 py-3 font-mono">{p.presentDays} / {p.workingDays}</td>
-                  <td className="px-4 py-3 font-mono font-semibold text-slate-200">₹{p.grossSalary.toLocaleString('en-IN')}</td>
-                  <td className="px-4 py-3 font-mono text-rose-400">₹{p.epfDeduction}</td>
-                  <td className="px-4 py-3 font-mono text-rose-400">₹{p.esiDeduction}</td>
-                  <td className="px-4 py-3 font-mono text-rose-400">₹{p.ptDeduction}</td>
-                  <td className="px-4 py-3 font-mono font-bold text-emerald-400">₹{p.netPay.toLocaleString('en-IN')}</td>
-                  <td className="px-4 py-3 text-right">
-                    <div className="flex items-center justify-end gap-1.5">
-                      {role !== 'EMPLOYEE' && (
-                        <button
-                          onClick={() => {
-                            setEditingPayrollRecord(p);
-                            setEditPayrollModalOpen(true);
-                          }}
-                          className="p-1.5 rounded-lg bg-slate-900 text-sky-400 hover:bg-slate-800 border border-[#1f2f58]"
-                          title="Edit Salary Breakdown"
-                        >
-                          <Edit2 className="w-3.5 h-3.5" />
-                        </button>
-                      )}
-
+            <tbody className="divide-y divide-[#1f2f58]">
+              {filteredPayslips.length === 0 ? (
+                <tr>
+                  <td colSpan={8} className="text-center py-12 text-slate-500">
+                    <Receipt className="w-10 h-10 mx-auto text-slate-600 mb-2 opacity-50" />
+                    <p className="font-semibold text-slate-400">No payslips found matching your search or filters.</p>
+                    {isSuperAdmin && (
                       <button
-                        onClick={() => setActivePayslip(p)}
-                        className="px-3 py-1 bg-amber-500/20 hover:bg-amber-500/30 text-amber-400 border border-amber-500/40 rounded-lg text-xs font-bold transition-all shadow"
+                        onClick={handleOpenUploadModal}
+                        className="mt-3 px-4 py-2 rounded-xl bg-amber-500 text-slate-950 font-bold text-xs shadow inline-flex items-center gap-1.5"
                       >
-                        View & Print
+                        <Upload className="w-3.5 h-3.5" />
+                        <span>Upload First Payslip</span>
                       </button>
-                    </div>
+                    )}
                   </td>
                 </tr>
-              ))}
+              ) : (
+                filteredPayslips.map((payslip) => (
+                  <tr key={payslip.id} className="hover:bg-slate-900/60 transition-colors">
+                    {/* Employee Particulars */}
+                    <td className="px-4 py-3.5">
+                      <div className="flex items-center gap-2.5">
+                        <div className="w-8 h-8 rounded-lg bg-amber-500/10 border border-amber-500/30 flex items-center justify-center font-bold text-amber-400 text-xs">
+                          {payslip.employeeId.slice(-2)}
+                        </div>
+                        <div>
+                          <div className="flex items-center gap-1.5">
+                            <span className="font-mono font-bold text-amber-400">{payslip.employeeId}</span>
+                            <span className="text-white font-bold">{payslip.employeeName}</span>
+                          </div>
+                          <p className="text-[10px] text-slate-400">{payslip.designation} • {payslip.siteName}</p>
+                        </div>
+                      </div>
+                    </td>
+
+                    {/* Period */}
+                    <td className="px-4 py-3.5">
+                      <span className="px-2.5 py-1 rounded-full bg-slate-900 border border-[#1f2f58] font-bold text-slate-200 text-xs inline-flex items-center gap-1">
+                        <Calendar className="w-3 h-3 text-amber-400" />
+                        {payslip.monthYear}
+                      </span>
+                    </td>
+
+                    {/* Gross */}
+                    <td className="px-4 py-3.5 font-mono text-white font-semibold">
+                      ₹{payslip.grossSalary.toLocaleString('en-IN')}
+                    </td>
+
+                    {/* Deductions */}
+                    <td className="px-4 py-3.5 font-mono text-rose-400 font-semibold">
+                      -₹{payslip.totalDeductions.toLocaleString('en-IN')}
+                    </td>
+
+                    {/* Net Pay */}
+                    <td className="px-4 py-3.5">
+                      <div className="font-mono font-black text-emerald-400 text-sm">
+                        ₹{payslip.netPay.toLocaleString('en-IN')}
+                      </div>
+                      <span className="text-[9px] text-emerald-500/80 font-bold uppercase tracking-wider">● Disbursed</span>
+                    </td>
+
+                    {/* Attached File */}
+                    <td className="px-4 py-3.5">
+                      <div className="flex items-center gap-1.5">
+                        <span className={`px-2 py-0.5 rounded text-[10px] font-bold font-mono border ${
+                          payslip.fileType === 'PDF'
+                            ? 'bg-rose-950/40 text-rose-300 border-rose-500/30'
+                            : 'bg-sky-950/40 text-sky-300 border-sky-500/30'
+                        }`}>
+                          {payslip.fileType}
+                        </span>
+                        <span className="text-slate-300 text-[11px] font-mono truncate max-w-[140px]" title={payslip.fileName}>
+                          {payslip.fileName || 'Computerized Slip'}
+                        </span>
+                      </div>
+                      <span className="text-[10px] text-slate-500 block">{payslip.fileSize || 'Standard'}</span>
+                    </td>
+
+                    {/* Upload Date */}
+                    <td className="px-4 py-3.5 text-[11px] text-slate-400 font-mono">
+                      {payslip.uploadedAt}
+                    </td>
+
+                    {/* Actions */}
+                    <td className="px-4 py-3.5 text-right">
+                      <div className="flex items-center justify-end gap-1.5">
+                        {/* View Payslip */}
+                        <button
+                          onClick={() => {
+                            setActivePayslip(payslip);
+                            setViewerTab('letterhead');
+                          }}
+                          className="px-2.5 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-200 border border-[#1f2f58] hover:border-amber-500 text-xs font-bold flex items-center gap-1 transition-all cursor-pointer"
+                          title="View Official Payslip"
+                        >
+                          <Eye className="w-3.5 h-3.5 text-amber-400" />
+                          <span>View</span>
+                        </button>
+
+                        {/* Download Payslip */}
+                        <button
+                          onClick={() => handleDownload(payslip)}
+                          className="p-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-300 hover:text-emerald-400 border border-[#1f2f58] transition-all cursor-pointer"
+                          title="Download Payslip (PDF/Image)"
+                        >
+                          <Download className="w-3.5 h-3.5" />
+                        </button>
+
+                        {/* Super Admin Exclusive Controls */}
+                        {isSuperAdmin && (
+                          <>
+                            {/* Replace File Button */}
+                            <button
+                              onClick={() => {
+                                setTargetReplaceRecord(payslip);
+                                setReplaceModalOpen(true);
+                              }}
+                              className="p-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-300 hover:text-sky-400 border border-[#1f2f58] transition-all cursor-pointer"
+                              title="Replace / Re-upload File"
+                            >
+                              <RefreshCw className="w-3.5 h-3.5" />
+                            </button>
+
+                            {/* Delete Payslip */}
+                            <button
+                              onClick={() => setDeleteConfirmId(payslip.id)}
+                              className="p-1.5 rounded-lg bg-slate-900 hover:bg-rose-950/40 text-slate-400 hover:text-rose-400 border border-[#1f2f58] transition-all cursor-pointer"
+                              title="Delete Payslip"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                ))
+              )}
             </tbody>
           </table>
         </div>
       </div>
 
-      {/* Edit Payroll Record Modal */}
-      {editPayrollModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/85 backdrop-blur-sm animate-in fade-in">
-          <div className="bg-[#0b1329] border border-[#1f2f58] w-full max-w-lg rounded-2xl p-6 shadow-2xl space-y-4">
-            <div className="flex items-center justify-between pb-3 border-b border-[#1f2f58]">
-              <h3 className="text-sm font-bold text-white">
-                Edit Salary Record: {editingPayrollRecord.employeeName} ({editingPayrollRecord.employeeId})
-              </h3>
-              <button onClick={() => setEditPayrollModalOpen(false)} className="p-1 rounded-lg text-slate-400 hover:text-white">
+      {/* ========================================================================= */}
+      {/* MODAL 1: SUPER ADMIN UPLOAD PAYSLIP MODAL                                  */}
+      {/* ========================================================================= */}
+      {uploadModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/85 backdrop-blur-md animate-in fade-in overflow-y-auto">
+          <div className="bg-[#0b1329] border border-[#1f2f58] rounded-3xl w-full max-w-3xl shadow-2xl p-6 sm:p-8 space-y-6 my-8 max-h-[90vh] overflow-y-auto">
+            {/* Modal Header */}
+            <div className="flex items-center justify-between pb-4 border-b border-[#1f2f58]">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-2xl bg-amber-500/20 text-amber-400 flex items-center justify-center border border-amber-500/30">
+                  <Upload className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-white">Upload & Publish Employee Payslip</h3>
+                  <p className="text-xs text-slate-400">Select employee, attach PDF/JPG/PNG file, and verify salary components</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setUploadModalOpen(false)}
+                className="p-1.5 rounded-xl text-slate-400 hover:text-white bg-slate-900 border border-[#1f2f58] cursor-pointer"
+              >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            <form onSubmit={handleSaveEditedPayroll} className="space-y-3.5 text-xs">
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block font-semibold text-slate-300 mb-1">Basic Salary (₹)</label>
-                  <input
-                    type="number"
-                    value={editingPayrollRecord.basicSalary || 0}
-                    onChange={(e) => {
-                      const basic = parseInt(e.target.value) || 0;
-                      const hra = Math.round(basic * 0.4);
-                      const gross = basic + hra + (editingPayrollRecord.allowances || 4100);
-                      const epf = Math.round(basic * 0.12);
-                      const esi = gross <= 21000 ? Math.round(gross * 0.0075) : 0;
-                      const pt = 200;
-                      const totalDeductions = epf + esi + pt;
-                      setEditingPayrollRecord({
-                        ...editingPayrollRecord,
-                        basicSalary: basic,
-                        hra,
-                        grossSalary: gross,
-                        epfDeduction: epf,
-                        esiDeduction: esi,
-                        totalDeductions,
-                        netPay: gross - totalDeductions
-                      });
-                    }}
-                    className="w-full bg-slate-900 border border-[#1f2f58] rounded-xl px-3 py-2 text-white font-mono"
-                  />
+            <form onSubmit={handleSubmitUpload} className="space-y-5">
+              {/* Step 1: Employee & Period Selectors */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 bg-[#070e1e] p-4 rounded-2xl border border-[#1f2f58]">
+                {/* Employee Selector */}
+                <div className="sm:col-span-1 space-y-1">
+                  <label className="block text-xs font-bold text-slate-300 uppercase tracking-wider">
+                    Select Employee ID <span className="text-rose-400">*</span>
+                  </label>
+                  <select
+                    value={uploadEmpId}
+                    onChange={(e) => setUploadEmpId(e.target.value)}
+                    required
+                    className="w-full bg-[#0b1329] border border-[#1f2f58] rounded-xl px-3 py-2.5 text-xs text-white focus:outline-none focus:border-amber-500 font-bold cursor-pointer"
+                  >
+                    {employees.map(emp => (
+                      <option key={emp.id} value={emp.id} className="bg-slate-900">
+                        {emp.id} - {emp.name}
+                      </option>
+                    ))}
+                  </select>
                 </div>
-                <div>
-                  <label className="block font-semibold text-slate-300 mb-1">HRA Allowance (₹)</label>
-                  <input
-                    type="number"
-                    value={editingPayrollRecord.hra || 0}
-                    onChange={(e) => setEditingPayrollRecord({ ...editingPayrollRecord, hra: parseInt(e.target.value) || 0 })}
-                    className="w-full bg-slate-900 border border-[#1f2f58] rounded-xl px-3 py-2 text-white font-mono"
-                  />
+
+                {/* Month Selector */}
+                <div className="space-y-1">
+                  <label className="block text-xs font-bold text-slate-300 uppercase tracking-wider">
+                    Salary Month <span className="text-rose-400">*</span>
+                  </label>
+                  <select
+                    value={uploadMonth}
+                    onChange={(e) => setUploadMonth(e.target.value)}
+                    className="w-full bg-[#0b1329] border border-[#1f2f58] rounded-xl px-3 py-2.5 text-xs text-white focus:outline-none focus:border-amber-500 font-bold cursor-pointer"
+                  >
+                    {MONTH_NAMES.map(m => (
+                      <option key={m} value={m} className="bg-slate-900">{m}</option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Year Selector */}
+                <div className="space-y-1">
+                  <label className="block text-xs font-bold text-slate-300 uppercase tracking-wider">
+                    Salary Year <span className="text-rose-400">*</span>
+                  </label>
+                  <select
+                    value={uploadYear}
+                    onChange={(e) => setUploadYear(Number(e.target.value))}
+                    className="w-full bg-[#0b1329] border border-[#1f2f58] rounded-xl px-3 py-2.5 text-xs text-white focus:outline-none focus:border-amber-500 font-bold cursor-pointer"
+                  >
+                    <option value={2026} className="bg-slate-900">2026</option>
+                    <option value={2025} className="bg-slate-900">2025</option>
+                    <option value={2024} className="bg-slate-900">2024</option>
+                  </select>
                 </div>
               </div>
 
-              <div className="grid grid-cols-3 gap-3">
-                <div>
-                  <label className="block font-semibold text-slate-300 mb-1">EPF (12%)</label>
+              {/* Step 2: File Upload Drag & Drop Area */}
+              <div className="space-y-2">
+                <label className="block text-xs font-bold text-slate-300 uppercase tracking-wider">
+                  Attach Payslip File (PDF, JPG, JPEG, PNG)
+                </label>
+
+                <div
+                  onClick={() => fileInputRef.current?.click()}
+                  className="border-2 border-dashed border-[#1f2f58] hover:border-amber-500 rounded-2xl p-6 text-center bg-[#070e1e] hover:bg-slate-900/60 transition-all cursor-pointer group"
+                >
                   <input
-                    type="number"
-                    value={editingPayrollRecord.epfDeduction || 0}
-                    onChange={(e) => setEditingPayrollRecord({ ...editingPayrollRecord, epfDeduction: parseInt(e.target.value) || 0 })}
-                    className="w-full bg-slate-900 border border-[#1f2f58] rounded-xl px-3 py-2 text-white font-mono"
+                    type="file"
+                    ref={fileInputRef}
+                    onChange={handleFileChange}
+                    accept=".pdf, .jpg, .jpeg, .png"
+                    className="hidden"
                   />
-                </div>
-                <div>
-                  <label className="block font-semibold text-slate-300 mb-1">ESIC (0.75%)</label>
-                  <input
-                    type="number"
-                    value={editingPayrollRecord.esiDeduction || 0}
-                    onChange={(e) => setEditingPayrollRecord({ ...editingPayrollRecord, esiDeduction: parseInt(e.target.value) || 0 })}
-                    className="w-full bg-slate-900 border border-[#1f2f58] rounded-xl px-3 py-2 text-white font-mono"
-                  />
-                </div>
-                <div>
-                  <label className="block font-semibold text-slate-300 mb-1">Prof. Tax (PT)</label>
-                  <input
-                    type="number"
-                    value={editingPayrollRecord.ptDeduction || 200}
-                    onChange={(e) => setEditingPayrollRecord({ ...editingPayrollRecord, ptDeduction: parseInt(e.target.value) || 0 })}
-                    className="w-full bg-slate-900 border border-[#1f2f58] rounded-xl px-3 py-2 text-white font-mono"
-                  />
+                  {selectedFile ? (
+                    <div className="flex flex-col items-center gap-2">
+                      <div className="w-12 h-12 rounded-2xl bg-emerald-500/20 text-emerald-400 flex items-center justify-center border border-emerald-500/40">
+                        {selectedFile.type.includes('pdf') ? <FileText className="w-6 h-6" /> : <ImageIcon className="w-6 h-6" />}
+                      </div>
+                      <span className="text-sm font-bold text-white">{selectedFile.name}</span>
+                      <span className="text-xs text-emerald-400 font-mono">
+                        {(selectedFile.size / 1024).toFixed(1)} KB • Ready for secure upload
+                      </span>
+                    </div>
+                  ) : (
+                    <div className="flex flex-col items-center gap-2">
+                      <div className="w-12 h-12 rounded-2xl bg-slate-900 text-amber-400 flex items-center justify-center border border-[#1f2f58] group-hover:scale-110 transition-transform">
+                        <Upload className="w-6 h-6" />
+                      </div>
+                      <span className="text-xs font-bold text-white">Click or drag & drop to upload payslip file</span>
+                      <span className="text-[10px] text-slate-400">Supports PDF, JPG, JPEG, and PNG formats</span>
+                    </div>
+                  )}
                 </div>
               </div>
 
-              <div className="p-3 bg-slate-950 rounded-xl border border-[#1f2f58] flex justify-between items-center text-xs">
-                <span>Calculated Net Pay:</span>
-                <span className="text-base font-black text-emerald-400 font-mono">
-                  ₹{(editingPayrollRecord.netPay || 0).toLocaleString('en-IN')}
-                </span>
+              {/* Step 3: Reference Salary Breakdown (Live Computations) */}
+              <div className="space-y-3 bg-[#070e1e] p-5 rounded-2xl border border-[#1f2f58]">
+                <div className="flex items-center justify-between pb-2 border-b border-[#1f2f58]">
+                  <span className="text-xs font-bold text-amber-400 uppercase tracking-wider flex items-center gap-1.5">
+                    <Sparkles className="w-3.5 h-3.5" />
+                    Salary Components & Statutory Computations
+                  </span>
+                  <span className="text-[10px] text-slate-400 font-medium">Auto-computed per VPHS formula</span>
+                </div>
+
+                {/* Earnings Row */}
+                <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 text-xs">
+                  <div>
+                    <label className="block text-slate-400 text-[10px] uppercase font-bold mb-1">Basic (₹)</label>
+                    <input
+                      type="number"
+                      value={salaryInputs.basicSalary}
+                      onChange={(e) => setSalaryInputs({ ...salaryInputs, basicSalary: Number(e.target.value) || 0 })}
+                      className="w-full bg-[#0b1329] border border-[#1f2f58] rounded-xl px-2.5 py-1.5 text-white font-mono text-xs focus:border-amber-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-slate-400 text-[10px] uppercase font-bold mb-1">VDA (₹)</label>
+                    <input
+                      type="number"
+                      value={salaryInputs.vda}
+                      onChange={(e) => setSalaryInputs({ ...salaryInputs, vda: Number(e.target.value) || 0 })}
+                      className="w-full bg-[#0b1329] border border-[#1f2f58] rounded-xl px-2.5 py-1.5 text-white font-mono text-xs focus:border-amber-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-slate-400 text-[10px] uppercase font-bold mb-1">HRA (₹)</label>
+                    <input
+                      type="number"
+                      value={salaryInputs.hra}
+                      onChange={(e) => setSalaryInputs({ ...salaryInputs, hra: Number(e.target.value) || 0 })}
+                      className="w-full bg-[#0b1329] border border-[#1f2f58] rounded-xl px-2.5 py-1.5 text-white font-mono text-xs focus:border-amber-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-slate-400 text-[10px] uppercase font-bold mb-1">Washing (₹)</label>
+                    <input
+                      type="number"
+                      value={salaryInputs.washingAllowance}
+                      onChange={(e) => setSalaryInputs({ ...salaryInputs, washingAllowance: Number(e.target.value) || 0 })}
+                      className="w-full bg-[#0b1329] border border-[#1f2f58] rounded-xl px-2.5 py-1.5 text-white font-mono text-xs focus:border-amber-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-slate-400 text-[10px] uppercase font-bold mb-1">Other (₹)</label>
+                    <input
+                      type="number"
+                      value={salaryInputs.otherAllowances}
+                      onChange={(e) => setSalaryInputs({ ...salaryInputs, otherAllowances: Number(e.target.value) || 0 })}
+                      className="w-full bg-[#0b1329] border border-[#1f2f58] rounded-xl px-2.5 py-1.5 text-white font-mono text-xs focus:border-amber-500"
+                    />
+                  </div>
+                </div>
+
+                {/* Deductions Row */}
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs pt-2 border-t border-[#1f2f58]/50">
+                  <div>
+                    <label className="block text-slate-400 text-[10px] uppercase font-bold mb-1">Emp. PF (₹)</label>
+                    <input
+                      type="number"
+                      value={salaryInputs.epfDeduction}
+                      onChange={(e) => setSalaryInputs({ ...salaryInputs, epfDeduction: Number(e.target.value) || 0 })}
+                      className="w-full bg-[#0b1329] border border-[#1f2f58] rounded-xl px-2.5 py-1.5 text-rose-400 font-mono text-xs focus:border-amber-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-slate-400 text-[10px] uppercase font-bold mb-1">Emp. ESI (₹)</label>
+                    <input
+                      type="number"
+                      value={salaryInputs.esiDeduction}
+                      onChange={(e) => setSalaryInputs({ ...salaryInputs, esiDeduction: Number(e.target.value) || 0 })}
+                      className="w-full bg-[#0b1329] border border-[#1f2f58] rounded-xl px-2.5 py-1.5 text-rose-400 font-mono text-xs focus:border-amber-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-slate-400 text-[10px] uppercase font-bold mb-1">PT (₹)</label>
+                    <input
+                      type="number"
+                      value={salaryInputs.ptDeduction}
+                      onChange={(e) => setSalaryInputs({ ...salaryInputs, ptDeduction: Number(e.target.value) || 0 })}
+                      className="w-full bg-[#0b1329] border border-[#1f2f58] rounded-xl px-2.5 py-1.5 text-rose-400 font-mono text-xs focus:border-amber-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-slate-400 text-[10px] uppercase font-bold mb-1">Employer PF (₹)</label>
+                    <input
+                      type="number"
+                      value={salaryInputs.employerPf}
+                      onChange={(e) => setSalaryInputs({ ...salaryInputs, employerPf: Number(e.target.value) || 0 })}
+                      className="w-full bg-[#0b1329] border border-[#1f2f58] rounded-xl px-2.5 py-1.5 text-sky-400 font-mono text-xs focus:border-amber-500"
+                    />
+                  </div>
+                </div>
+
+                {/* Computation Summary Banner */}
+                <div className="grid grid-cols-3 gap-2 p-3 bg-slate-950 rounded-xl border border-[#1f2f58] text-center">
+                  <div>
+                    <span className="text-[10px] font-bold text-slate-400 block">Gross Salary (A)</span>
+                    <span className="font-mono font-bold text-white text-sm">₹{liveTotals.grossSalary.toLocaleString('en-IN')}</span>
+                  </div>
+                  <div>
+                    <span className="text-[10px] font-bold text-rose-400 block">Total Deductions (C)</span>
+                    <span className="font-mono font-bold text-rose-400 text-sm">₹{liveTotals.totalDeductions.toLocaleString('en-IN')}</span>
+                  </div>
+                  <div className="bg-amber-500/10 rounded-lg p-1 border border-amber-500/30">
+                    <span className="text-[10px] font-bold text-amber-400 block">Net Take-Home (A-C)</span>
+                    <span className="font-mono font-black text-amber-300 text-sm">₹{liveTotals.netPay.toLocaleString('en-IN')}</span>
+                  </div>
+                </div>
               </div>
 
-              <div className="pt-2 border-t border-[#1f2f58] flex justify-end gap-2">
+              {/* Submit Buttons */}
+              <div className="pt-3 border-t border-[#1f2f58] flex items-center justify-end gap-3">
                 <button
                   type="button"
-                  onClick={() => setEditPayrollModalOpen(false)}
-                  className="px-4 py-2 rounded-xl bg-slate-800 text-slate-300"
+                  onClick={() => setUploadModalOpen(false)}
+                  className="px-4 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-300 font-bold text-xs cursor-pointer"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold shadow"
+                  disabled={isSubmitting}
+                  className="px-6 py-2.5 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-slate-950 rounded-xl font-extrabold text-xs shadow-gold-sm flex items-center gap-2 cursor-pointer"
                 >
-                  Save Salary Changes
+                  {isSubmitting ? (
+                    <span>Publishing Payslip...</span>
+                  ) : (
+                    <>
+                      <CheckCircle2 className="w-4 h-4" />
+                      <span>Save & Publish Payslip</span>
+                    </>
+                  )}
                 </button>
               </div>
             </form>
@@ -360,179 +974,387 @@ export const PayrollEngine: React.FC = () => {
         </div>
       )}
 
-      {/* Official VPHS Printable PDF Payslip Modal */}
-      {activePayslip && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/85 backdrop-blur-sm animate-in fade-in">
-          <div className="bg-white text-slate-900 w-full max-w-3xl rounded-2xl shadow-2xl p-6 sm:p-10 space-y-6 max-h-[95vh] overflow-y-auto print:p-0 print:m-0 print:shadow-none print:w-full">
-            {/* Modal Controls */}
-            <div className="flex items-center justify-between pb-4 border-b border-slate-200 print:hidden">
-              <div className="flex items-center gap-2">
-                <ShieldCheck className="w-5 h-5 text-amber-600" />
-                <span className="text-xs font-bold text-slate-700 uppercase tracking-wider">Official Computerized Payslip</span>
+      {/* ========================================================================= */}
+      {/* MODAL 2: SUPER ADMIN REPLACE FILE MODAL                                    */}
+      {/* ========================================================================= */}
+      {replaceModalOpen && targetReplaceRecord && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/85 backdrop-blur-md animate-in fade-in">
+          <div className="bg-[#0b1329] border border-[#1f2f58] rounded-3xl w-full max-w-md shadow-2xl p-6 space-y-4">
+            <div className="flex items-center justify-between pb-3 border-b border-[#1f2f58]">
+              <div className="flex items-center gap-2 text-sky-400">
+                <RefreshCw className="w-5 h-5" />
+                <h3 className="text-sm font-bold text-white">Replace Payslip File</h3>
               </div>
-              <div className="flex items-center gap-2">
+              <button
+                onClick={() => setReplaceModalOpen(false)}
+                className="p-1 rounded-lg text-slate-400 hover:text-white"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleReplaceFileSubmit} className="space-y-4 text-xs">
+              <p className="text-slate-300">
+                Select a new PDF, JPG, or PNG file to replace the existing payslip for{' '}
+                <strong className="text-white">{targetReplaceRecord.employeeName}</strong> ({targetReplaceRecord.monthYear}).
+              </p>
+
+              <div className="p-3 bg-slate-950 rounded-xl border border-[#1f2f58] space-y-1 font-mono text-[11px]">
+                <div className="text-slate-400">Current File: <span className="text-amber-400">{targetReplaceRecord.fileName}</span></div>
+                <div className="text-slate-500">Size: {targetReplaceRecord.fileSize} • Uploaded: {targetReplaceRecord.uploadedAt}</div>
+              </div>
+
+              <div>
+                <label className="block font-bold text-slate-300 mb-1.5">Select New Document</label>
+                <input
+                  type="file"
+                  ref={replaceFileInputRef}
+                  required
+                  accept=".pdf, .jpg, .jpeg, .png"
+                  className="w-full bg-[#070e1e] border border-[#1f2f58] rounded-xl px-3 py-2 text-white file:mr-3 file:py-1 file:px-3 file:rounded-lg file:border-0 file:bg-amber-500 file:text-slate-950 file:font-bold file:text-xs cursor-pointer"
+                />
+              </div>
+
+              <div className="pt-3 border-t border-[#1f2f58] flex justify-end gap-2">
                 <button
-                  onClick={handlePrint}
-                  className="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold text-xs flex items-center gap-1.5 shadow"
+                  type="button"
+                  onClick={() => setReplaceModalOpen(false)}
+                  className="px-4 py-2 rounded-xl bg-slate-900 text-slate-300 font-bold"
                 >
-                  <Printer className="w-4 h-4" />
-                  <span>Print / Save as PDF</span>
+                  Cancel
                 </button>
                 <button
+                  type="submit"
+                  className="px-5 py-2 rounded-xl bg-sky-500 hover:bg-sky-400 text-slate-950 font-bold shadow"
+                >
+                  Upload Replacement
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================= */}
+      {/* MODAL 3: DELETE CONFIRMATION MODAL                                         */}
+      {/* ========================================================================= */}
+      {deleteConfirmId && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/85 backdrop-blur-md animate-in fade-in">
+          <div className="bg-[#0b1329] border border-rose-500/40 rounded-3xl w-full max-w-sm shadow-2xl p-6 space-y-4 text-center">
+            <div className="w-12 h-12 rounded-2xl bg-rose-500/20 text-rose-400 flex items-center justify-center mx-auto border border-rose-500/40">
+              <Trash2 className="w-6 h-6" />
+            </div>
+            <h3 className="text-base font-bold text-white">Delete Payslip Record?</h3>
+            <p className="text-xs text-slate-400">
+              Are you sure you want to delete this payslip record? This action will remove the record from both the Super Admin vault and employee self-service.
+            </p>
+            <div className="flex items-center justify-center gap-3 pt-2">
+              <button
+                onClick={() => setDeleteConfirmId(null)}
+                className="px-4 py-2 rounded-xl bg-slate-900 text-slate-300 font-bold text-xs cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => {
+                  deletePayslip(deleteConfirmId);
+                  setDeleteConfirmId(null);
+                }}
+                className="px-5 py-2 rounded-xl bg-rose-500 hover:bg-rose-600 text-white font-bold text-xs shadow cursor-pointer"
+              >
+                Confirm Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================= */}
+      {/* MODAL 4: UNIVERSAL HIGH-FIDELITY PAYSLIP VIEWER & PRINT MODAL              */}
+      {/* ========================================================================= */}
+      {activePayslip && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/90 backdrop-blur-md animate-in fade-in overflow-y-auto">
+          <div className="bg-white text-slate-900 w-full max-w-3xl rounded-3xl shadow-2xl p-6 sm:p-10 space-y-6 max-h-[92vh] overflow-y-auto print:p-0 print:m-0 print:shadow-none print:w-full print:max-h-none">
+            {/* Modal Navigation & Controls (Hidden in Print) */}
+            <div className="flex items-center justify-between pb-4 border-b border-slate-200 print:hidden">
+              <div className="flex items-center gap-2">
+                <span className="px-3 py-1 rounded-full bg-slate-100 text-slate-800 text-xs font-mono font-bold border border-slate-300">
+                  {activePayslip.employeeId}
+                </span>
+                <span className="text-xs font-bold text-slate-700 uppercase tracking-wider">Official Computerized Payslip</span>
+              </div>
+
+              <div className="flex items-center gap-2">
+                {activePayslip.fileUrl && (
+                  <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-xl border border-slate-300">
+                    <button
+                      onClick={() => setViewerTab('letterhead')}
+                      className={`px-3 py-1 rounded-lg text-xs font-bold transition-all ${
+                        viewerTab === 'letterhead' ? 'bg-amber-500 text-slate-950 shadow' : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      Formatted Slip
+                    </button>
+                    <button
+                      onClick={() => setViewerTab('file')}
+                      className={`px-3 py-1 rounded-lg text-xs font-bold transition-all ${
+                        viewerTab === 'file' ? 'bg-amber-500 text-slate-950 shadow' : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      Attached Document
+                    </button>
+                  </div>
+                )}
+
+                <button
+                  onClick={handlePrint}
+                  className="px-3.5 py-1.5 rounded-xl bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold text-xs flex items-center gap-1.5 shadow cursor-pointer"
+                >
+                  <Printer className="w-4 h-4" />
+                  <span>Print / Save PDF</span>
+                </button>
+
+                <button
+                  onClick={() => handleDownload(activePayslip)}
+                  className="p-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 cursor-pointer"
+                  title="Download File"
+                >
+                  <Download className="w-4 h-4" />
+                </button>
+
+                <button
                   onClick={() => setActivePayslip(null)}
-                  className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700"
+                  className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 cursor-pointer"
                 >
                   <X className="w-5 h-5" />
                 </button>
               </div>
             </div>
 
-            {/* Letterhead */}
-            <div className="text-center space-y-1.5 border-b-2 border-slate-900 pb-4">
-              <div className="inline-flex items-center gap-2">
-                <div className="w-9 h-9 rounded-lg bg-amber-500 flex items-center justify-center font-black text-slate-950 text-xl">
-                  V
+            {/* TAB CONTENT 1: ATTACHED ORIGINAL DOCUMENT (IF AVAILABLE) */}
+            {viewerTab === 'file' && activePayslip.fileUrl ? (
+              <div className="space-y-4">
+                <div className="flex items-center justify-between p-3 bg-slate-50 border border-slate-200 rounded-xl text-xs">
+                  <span className="font-mono font-bold text-slate-700">File: {activePayslip.fileName}</span>
+                  <a
+                    href={activePayslip.fileUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-amber-600 hover:underline font-bold flex items-center gap-1"
+                  >
+                    <span>Open in new window</span>
+                    <ExternalLink className="w-3.5 h-3.5" />
+                  </a>
                 </div>
-                <h2 className="text-2xl font-black text-slate-950 tracking-wider">VPHS SERVICES PVT. LTD.</h2>
-              </div>
-              <p className="text-xs text-slate-600 font-medium">
-                {companySettings.address}, {companySettings.city}, {companySettings.state} - {companySettings.pincode}
-              </p>
-              <div className="flex flex-wrap justify-center gap-4 text-[10px] text-slate-500 pt-1 font-mono">
-                <span>CIN: {companySettings.cin}</span>
-                <span>•</span>
-                <span>GSTIN: {companySettings.gstin}</span>
-                <span>•</span>
-                <span>EPFO: {companySettings.epfoCode}</span>
-                <span>•</span>
-                <span>ESIC: {companySettings.esicCode}</span>
-              </div>
-              <h3 className="text-sm font-extrabold text-slate-900 uppercase tracking-widest pt-2 bg-slate-100 py-1 rounded">
-                PAYSLIP FOR THE MONTH OF {activePayslip.month.toUpperCase()}
-              </h3>
-            </div>
-
-            {/* Employee Particulars Grid */}
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs bg-slate-50 p-4 rounded-xl border border-slate-200">
-              <div>
-                <span className="text-slate-500 block text-[10px] uppercase">Employee ID</span>
-                <span className="font-mono font-bold text-slate-900">{activePayslip.employeeId}</span>
-              </div>
-              <div>
-                <span className="text-slate-500 block text-[10px] uppercase">Employee Name</span>
-                <span className="font-bold text-slate-900">{activePayslip.employeeName}</span>
-              </div>
-              <div>
-                <span className="text-slate-500 block text-[10px] uppercase">Designation</span>
-                <span className="text-slate-900">{activePayslip.designation}</span>
-              </div>
-              <div>
-                <span className="text-slate-500 block text-[10px] uppercase">Department</span>
-                <span className="text-slate-900">{activePayslip.department}</span>
-              </div>
-              <div>
-                <span className="text-slate-500 block text-[10px] uppercase">Bank Account</span>
-                <span className="font-mono text-slate-900">{activePayslip.bankAc}</span>
-              </div>
-              <div>
-                <span className="text-slate-500 block text-[10px] uppercase">IFSC Code</span>
-                <span className="font-mono text-slate-900">{activePayslip.ifsc}</span>
-              </div>
-              <div>
-                <span className="text-slate-500 block text-[10px] uppercase">Total Days Worked</span>
-                <span className="font-bold text-slate-900">{activePayslip.presentDays} Days</span>
-              </div>
-              <div>
-                <span className="text-slate-500 block text-[10px] uppercase">Assigned Site</span>
-                <span className="text-slate-900 truncate block">{activePayslip.siteName}</span>
-              </div>
-            </div>
-
-            {/* Earnings & Deductions Table */}
-            <div className="border border-slate-300 rounded-xl overflow-hidden text-xs">
-              <div className="grid grid-cols-2 bg-slate-900 text-white font-bold py-2 px-4">
-                <div>EARNINGS (₹)</div>
-                <div className="border-l border-slate-700 pl-4">STATUTORY DEDUCTIONS (₹)</div>
-              </div>
-
-              <div className="grid grid-cols-2 divide-x divide-slate-200">
-                {/* Earnings List */}
-                <div className="p-4 space-y-2">
-                  <div className="flex justify-between">
-                    <span>Basic Salary</span>
-                    <span className="font-mono">₹{activePayslip.basicSalary.toLocaleString('en-IN')}</span>
+                {activePayslip.fileType === 'PDF' || activePayslip.fileName?.endsWith('.pdf') ? (
+                  <iframe
+                    src={activePayslip.fileUrl}
+                    className="w-full h-[600px] border border-slate-300 rounded-2xl shadow-inner"
+                    title="PDF Payslip Viewer"
+                  />
+                ) : (
+                  <div className="p-4 bg-slate-100 rounded-2xl border border-slate-300 flex justify-center">
+                    <img
+                      src={activePayslip.fileUrl}
+                      alt="Uploaded Payslip"
+                      className="max-h-[600px] rounded-xl shadow-lg object-contain"
+                    />
                   </div>
-                  <div className="flex justify-between">
-                    <span>House Rent Allowance (HRA)</span>
-                    <span className="font-mono">₹{activePayslip.hra.toLocaleString('en-IN')}</span>
+                )}
+              </div>
+            ) : (
+              /* TAB CONTENT 2: OFFICIAL VPHS LETTERHEAD PAYSLIP */
+              <div className="space-y-6">
+                {/* Official Letterhead */}
+                <div className="text-center space-y-1.5 border-b-2 border-slate-900 pb-4">
+                  <div className="inline-flex items-center gap-2">
+                    <div className="w-9 h-9 rounded-lg bg-amber-500 flex items-center justify-center font-black text-slate-950 text-xl shadow">
+                      V
+                    </div>
+                    <h2 className="text-2xl font-black text-slate-950 tracking-wider">VPHS SERVICES PVT. LTD.</h2>
                   </div>
-                  <div className="flex justify-between">
-                    <span>Conveyance Allowance</span>
-                    <span className="font-mono">₹1,600</span>
+                  <p className="text-xs text-slate-600 font-medium max-w-xl mx-auto">
+                    {companySettings.address}, {companySettings.city}, {companySettings.state} - {companySettings.pincode}
+                  </p>
+                  <div className="flex flex-wrap justify-center gap-3 text-[10px] text-slate-500 pt-1 font-mono">
+                    <span>CIN: {companySettings.cin}</span>
+                    <span>•</span>
+                    <span>GSTIN: {companySettings.gstin}</span>
+                    <span>•</span>
+                    <span>EPFO: {companySettings.epfoCode}</span>
+                    <span>•</span>
+                    <span>ESIC: {companySettings.esicCode}</span>
                   </div>
-                  <div className="flex justify-between">
-                    <span>Special Allowance</span>
-                    <span className="font-mono">₹{(activePayslip.allowances - 1600).toLocaleString('en-IN')}</span>
-                  </div>
-                  <div className="pt-3 border-t border-slate-300 flex justify-between font-bold text-slate-950">
-                    <span>GROSS EARNINGS</span>
-                    <span className="font-mono">₹{activePayslip.grossSalary.toLocaleString('en-IN')}</span>
-                  </div>
+                  <h3 className="text-xs font-black text-slate-900 uppercase tracking-widest pt-2 bg-slate-100 py-1.5 rounded-lg">
+                    PAYSLIP FOR THE MONTH OF {activePayslip.monthYear.toUpperCase()}
+                  </h3>
                 </div>
 
-                {/* Deductions List */}
-                <div className="p-4 space-y-2">
-                  <div className="flex justify-between">
-                    <span>Employee PF (12%)</span>
-                    <span className="font-mono text-rose-700">₹{activePayslip.epfDeduction}</span>
+                {/* Employee Particulars Grid */}
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs bg-slate-50 p-4 rounded-2xl border border-slate-200">
+                  <div>
+                    <span className="text-slate-500 block text-[10px] uppercase font-semibold">Employee ID</span>
+                    <span className="font-mono font-bold text-slate-950">{activePayslip.employeeId}</span>
                   </div>
-                  <div className="flex justify-between">
-                    <span>Employee ESIC (0.75%)</span>
-                    <span className="font-mono text-rose-700">₹{activePayslip.esiDeduction}</span>
+                  <div>
+                    <span className="text-slate-500 block text-[10px] uppercase font-semibold">Employee Name</span>
+                    <span className="font-bold text-slate-950">{activePayslip.employeeName}</span>
                   </div>
-                  <div className="flex justify-between">
-                    <span>Professional Tax (PT)</span>
-                    <span className="font-mono text-rose-700">₹{activePayslip.ptDeduction}</span>
+                  <div>
+                    <span className="text-slate-500 block text-[10px] uppercase font-semibold">Designation</span>
+                    <span className="text-slate-900">{activePayslip.designation}</span>
                   </div>
-                  <div className="flex justify-between">
-                    <span>Income Tax (TDS)</span>
-                    <span className="font-mono text-slate-500">₹0</span>
+                  <div>
+                    <span className="text-slate-500 block text-[10px] uppercase font-semibold">Department</span>
+                    <span className="text-slate-900">{activePayslip.department}</span>
                   </div>
-                  <div className="pt-3 border-t border-slate-300 flex justify-between font-bold text-slate-950">
-                    <span>TOTAL DEDUCTIONS</span>
-                    <span className="font-mono text-rose-700">₹{activePayslip.totalDeductions}</span>
+                  <div>
+                    <span className="text-slate-500 block text-[10px] uppercase font-semibold">Assigned Site</span>
+                    <span className="text-slate-900 font-medium truncate block">{activePayslip.siteName}</span>
+                  </div>
+                  <div>
+                    <span className="text-slate-500 block text-[10px] uppercase font-semibold">Bank A/C No.</span>
+                    <span className="font-mono text-slate-900 font-semibold">{activePayslip.bankAc}</span>
+                  </div>
+                  <div>
+                    <span className="text-slate-500 block text-[10px] uppercase font-semibold">IFSC Code</span>
+                    <span className="font-mono text-slate-900">{activePayslip.ifsc}</span>
+                  </div>
+                  <div>
+                    <span className="text-slate-500 block text-[10px] uppercase font-semibold">EPFO UAN</span>
+                    <span className="font-mono text-slate-900 font-semibold">{activePayslip.uan}</span>
+                  </div>
+                  <div>
+                    <span className="text-slate-500 block text-[10px] uppercase font-semibold">Total Working Days</span>
+                    <span className="font-mono text-slate-900">{activePayslip.workingDays} Days</span>
+                  </div>
+                  <div>
+                    <span className="text-slate-500 block text-[10px] uppercase font-semibold">Present Days</span>
+                    <span className="font-mono font-bold text-emerald-700">{activePayslip.presentDays} Days</span>
+                  </div>
+                  <div>
+                    <span className="text-slate-500 block text-[10px] uppercase font-semibold">Loss of Pay (LOP)</span>
+                    <span className="font-mono text-slate-700">{activePayslip.lopDays} Day</span>
+                  </div>
+                  <div>
+                    <span className="text-slate-500 block text-[10px] uppercase font-semibold">PF / ESIC No.</span>
+                    <span className="font-mono text-[10px] text-slate-700 truncate block">{activePayslip.pfNo}</span>
                   </div>
                 </div>
-              </div>
 
-              {/* Net Pay Banner */}
-              <div className="bg-amber-50 p-4 border-t border-slate-300 flex flex-col sm:flex-row items-center justify-between gap-2">
-                <div>
-                  <span className="text-[11px] font-bold text-amber-900 uppercase">NET TAKE-HOME SALARY</span>
-                  <p className="text-xs text-slate-600">Disbursed via Electronic Bank Transfer (NEFT)</p>
-                </div>
-                <div className="text-2xl font-black text-slate-950 font-mono">
-                  ₹{activePayslip.netPay.toLocaleString('en-IN')}
-                </div>
-              </div>
-            </div>
+                {/* Earnings & Deductions Breakdown Table (Exact Reference Format) */}
+                <div className="border border-slate-300 rounded-2xl overflow-hidden text-xs shadow-sm">
+                  <div className="grid grid-cols-2 bg-slate-900 text-white font-bold py-2.5 px-4">
+                    <div className="tracking-wider">EARNINGS (₹)</div>
+                    <div className="border-l border-slate-700 pl-4 tracking-wider">STATUTORY DEDUCTIONS (₹)</div>
+                  </div>
 
-            {/* Authorised Signatory Footer */}
-            <div className="pt-8 flex items-end justify-between text-xs text-slate-600">
-              <div>
-                <p className="font-semibold text-slate-800">This is a computerized salary slip.</p>
-                <p className="text-[10px] text-slate-500">Generated securely by VPHS Facility & HR ERP System.</p>
-              </div>
-              <div className="text-center space-y-1">
-                <div className="w-36 border-b border-slate-400 pb-1 font-serif italic text-slate-800 font-bold">
-                  Vikram P. Singh
+                  <div className="grid grid-cols-2 divide-x divide-slate-200">
+                    {/* Earnings Particulars */}
+                    <div className="p-4 space-y-2">
+                      <div className="flex justify-between">
+                        <span className="text-slate-700">Basic Salary</span>
+                        <span className="font-mono font-semibold">₹{activePayslip.basicSalary.toLocaleString('en-IN')}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-slate-700">Variable Dearness Allowance (VDA)</span>
+                        <span className="font-mono font-semibold">₹{activePayslip.vda.toLocaleString('en-IN')}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-slate-700">House Rent Allowance (HRA)</span>
+                        <span className="font-mono font-semibold">₹{activePayslip.hra.toLocaleString('en-IN')}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-slate-700">Washing Allowance</span>
+                        <span className="font-mono font-semibold">₹{activePayslip.washingAllowance.toLocaleString('en-IN')}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-slate-700">Other Allowances</span>
+                        <span className="font-mono font-semibold">₹{activePayslip.otherAllowances.toLocaleString('en-IN')}</span>
+                      </div>
+
+                      <div className="pt-3 border-t-2 border-slate-900 flex justify-between font-black text-slate-950 text-sm">
+                        <span>GROSS SALARY (A)</span>
+                        <span className="font-mono">₹{activePayslip.grossSalary.toLocaleString('en-IN')}</span>
+                      </div>
+                    </div>
+
+                    {/* Deductions Particulars */}
+                    <div className="p-4 space-y-2">
+                      <div className="flex justify-between">
+                        <span className="text-slate-700">Employee PF (12%)</span>
+                        <span className="font-mono font-semibold text-rose-700">₹{activePayslip.epfDeduction.toLocaleString('en-IN')}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-slate-700">Employee ESI (0.75%)</span>
+                        <span className="font-mono font-semibold text-rose-700">₹{activePayslip.esiDeduction.toLocaleString('en-IN')}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-slate-700">Professional Tax (PT)</span>
+                        <span className="font-mono font-semibold text-rose-700">₹{activePayslip.ptDeduction.toLocaleString('en-IN')}</span>
+                      </div>
+                      {activePayslip.otherDeductions > 0 && (
+                        <div className="flex justify-between">
+                          <span className="text-slate-700">Other Deductions</span>
+                          <span className="font-mono font-semibold text-rose-700">₹{activePayslip.otherDeductions.toLocaleString('en-IN')}</span>
+                        </div>
+                      )}
+
+                      <div className="pt-8 border-t-2 border-slate-900 flex justify-between font-black text-slate-950 text-sm">
+                        <span>TOTAL DEDUCTIONS (C)</span>
+                        <span className="font-mono text-rose-700">₹{activePayslip.totalDeductions.toLocaleString('en-IN')}</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Employer Contributions (Cost to Company Summary) */}
+                  <div className="bg-slate-50 p-3.5 border-t border-slate-300 grid grid-cols-3 gap-2 text-[11px] text-slate-700">
+                    <div>
+                      <span className="text-slate-500 block text-[9px] uppercase">Employer PF (12%)</span>
+                      <span className="font-mono font-bold text-slate-900">₹{activePayslip.employerPf.toLocaleString('en-IN')}</span>
+                    </div>
+                    <div>
+                      <span className="text-slate-500 block text-[9px] uppercase">Employer ESI (3.25%)</span>
+                      <span className="font-mono font-bold text-slate-900">₹{activePayslip.employerEsi.toLocaleString('en-IN')}</span>
+                    </div>
+                    <div>
+                      <span className="text-slate-500 block text-[9px] uppercase">Monthly CTC (B)</span>
+                      <span className="font-mono font-black text-slate-950">₹{activePayslip.ctc.toLocaleString('en-IN')}</span>
+                    </div>
+                  </div>
+
+                  {/* Net Take-Home Highlight */}
+                  <div className="bg-amber-50 p-4 border-t-2 border-slate-900 flex flex-col sm:flex-row items-center justify-between gap-2">
+                    <div>
+                      <span className="text-[11px] font-black text-amber-950 uppercase tracking-wider block">
+                        NET TAKE-HOME SALARY (A - C)
+                      </span>
+                      <p className="text-[11px] text-slate-600">Disbursed via Electronic Bank Transfer (NEFT)</p>
+                    </div>
+                    <div className="text-2xl font-black text-slate-950 font-mono">
+                      ₹{activePayslip.netPay.toLocaleString('en-IN')}
+                    </div>
+                  </div>
                 </div>
-                <span className="text-[10px] font-bold uppercase tracking-wider text-slate-700 block">
-                  Authorised Signatory
-                </span>
-                <span className="text-[9px] text-slate-500">VPHS Services Pvt. Ltd.</span>
+
+                {/* Signatory Footer */}
+                <div className="pt-6 flex items-end justify-between text-xs text-slate-600 border-t border-slate-200">
+                  <div>
+                    <p className="font-semibold text-slate-800">This is a system-generated salary slip.</p>
+                    <p className="text-[10px] text-slate-500">Issued by VPHS Services Pvt. Ltd. • HR & Payroll Operations</p>
+                  </div>
+                  <div className="text-center space-y-1">
+                    <div className="w-36 border-b border-slate-500 pb-1 font-serif italic text-slate-900 font-bold text-sm">
+                      Vikram P. Singh
+                    </div>
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-slate-700 block">
+                      Authorised Signatory
+                    </span>
+                    <span className="text-[9px] text-slate-500">VPHS Services Pvt. Ltd.</span>
+                  </div>
+                </div>
               </div>
-            </div>
+            )}
           </div>
         </div>
       )}
