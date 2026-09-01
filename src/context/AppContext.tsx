@@ -1284,6 +1284,163 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     showToast(`Payslip status updated to ${status}.`);
   };
 
+  // Payslip Management Operations
+  const uploadPayslip = async (
+    data: Omit<PayslipRecord, 'id' | 'uploadedAt' | 'uploadedBy'> & { file?: File }
+  ): Promise<PayslipRecord> => {
+    let fileUrl = data.fileUrl;
+    let fileName = data.fileName || `VPHS_Payslip_${data.employeeId}_${data.month}_${data.year}`;
+    let fileType = data.fileType || 'DOCUMENT';
+    let fileSize = data.fileSize || '250 KB';
+
+    if (data.file) {
+      fileName = data.file.name;
+      fileSize = `${(data.file.size / 1024).toFixed(1)} KB`;
+      const ext = data.file.name.split('.').pop()?.toUpperCase();
+      fileType = ext === 'PDF' ? 'PDF' : ext === 'PNG' ? 'PNG' : ext === 'JPG' || ext === 'JPEG' ? 'JPG' : 'DOCUMENT';
+
+      // Read as Data URL
+      fileUrl = await new Promise<string>((resolve) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result as string);
+        reader.onerror = () => resolve('');
+        reader.readAsDataURL(data.file as File);
+      });
+    }
+
+    const calculated = calculateSalarySummary(
+      data.basicSalary,
+      data.vda,
+      data.hra,
+      data.washingAllowance,
+      data.otherAllowances,
+      data.epfDeduction,
+      data.esiDeduction,
+      data.ptDeduction,
+      data.otherDeductions || 0,
+      data.employerPf,
+      data.employerEsi
+    );
+
+    const now = new Date();
+    const formattedUploadDate = `${now.toISOString().split('T')[0]} ${now.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}`;
+
+    const newRecord: PayslipRecord = {
+      ...data,
+      id: `ps-${data.employeeId.toLowerCase()}-${Date.now()}`,
+      uploadedAt: formattedUploadDate,
+      uploadedBy: currentUser ? `${currentUser.name} (${currentUser.role.replace('_', ' ')})` : 'VPHS Super Admin',
+      fileName,
+      fileUrl,
+      fileType,
+      fileSize,
+      grossSalary: calculated.grossSalary,
+      employerPf: calculated.employerPf,
+      employerEsi: calculated.employerEsi,
+      ctc: calculated.ctc,
+      epfDeduction: calculated.epfDeduction,
+      esiDeduction: calculated.esiDeduction,
+      ptDeduction: calculated.ptDeduction,
+      otherDeductions: calculated.otherDeductions,
+      totalDeductions: calculated.totalDeductions,
+      netPay: calculated.netPay
+    };
+
+    setPayslips(prev => [newRecord, ...prev]);
+    addAuditLog(
+      `Uploaded payslip for ${newRecord.employeeName} (${newRecord.employeeId}) for ${newRecord.monthYear}`,
+      'Payslip Engine',
+      'Upload',
+      undefined,
+      `${newRecord.fileName} (${newRecord.fileSize})`
+    );
+    showToast(`Payslip for ${newRecord.employeeName} (${newRecord.monthYear}) published successfully!`, 'success');
+    return newRecord;
+  };
+
+  const updatePayslip = async (id: string, updates: Partial<PayslipRecord>, newFile?: File) => {
+    let fileUpdates: Partial<PayslipRecord> = {};
+    if (newFile) {
+      const fileName = newFile.name;
+      const fileSize = `${(newFile.size / 1024).toFixed(1)} KB`;
+      const ext = newFile.name.split('.').pop()?.toUpperCase();
+      const fileType = ext === 'PDF' ? 'PDF' : ext === 'PNG' ? 'PNG' : ext === 'JPG' || ext === 'JPEG' ? 'JPG' : 'DOCUMENT';
+
+      const fileUrl = await new Promise<string>((resolve) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result as string);
+        reader.onerror = () => resolve('');
+        reader.readAsDataURL(newFile);
+      });
+
+      const now = new Date();
+      fileUpdates = {
+        fileName,
+        fileSize,
+        fileType,
+        fileUrl,
+        uploadedAt: `${now.toISOString().split('T')[0]} ${now.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}`
+      };
+    }
+
+    setPayslips(prev =>
+      prev.map(p => {
+        if (p.id !== id) return p;
+        const merged = { ...p, ...updates, ...fileUpdates };
+        const calculated = calculateSalarySummary(
+          merged.basicSalary,
+          merged.vda,
+          merged.hra,
+          merged.washingAllowance,
+          merged.otherAllowances,
+          merged.epfDeduction,
+          merged.esiDeduction,
+          merged.ptDeduction,
+          merged.otherDeductions || 0,
+          merged.employerPf,
+          merged.employerEsi
+        );
+        return {
+          ...merged,
+          grossSalary: calculated.grossSalary,
+          employerPf: calculated.employerPf,
+          employerEsi: calculated.employerEsi,
+          ctc: calculated.ctc,
+          epfDeduction: calculated.epfDeduction,
+          esiDeduction: calculated.esiDeduction,
+          ptDeduction: calculated.ptDeduction,
+          otherDeductions: calculated.otherDeductions,
+          totalDeductions: calculated.totalDeductions,
+          netPay: calculated.netPay
+        };
+      })
+    );
+
+    addAuditLog(`Updated payslip ID ${id}`, 'Payslip Engine', 'Edit');
+    showToast('Payslip details updated successfully!', 'success');
+  };
+
+  const deletePayslip = (id: string) => {
+    const target = payslips.find(p => p.id === id);
+    setPayslips(prev => prev.filter(p => p.id !== id));
+    addAuditLog(
+      `Deleted payslip for ${target?.employeeName || id} (${target?.monthYear})`,
+      'Payslip Engine',
+      'Delete'
+    );
+    showToast(`Deleted payslip for ${target?.employeeName || 'employee'}.`, 'info');
+  };
+
+  const replacePayslipFile = async (id: string, file: File) => {
+    await updatePayslip(id, {}, file);
+    showToast(`Replaced payslip file with "${file.name}"!`, 'success');
+  };
+
+  const getPayslipsForEmployee = (employeeId: string) => {
+    const cleanId = (employeeId || '').toUpperCase().trim();
+    return payslips.filter(p => p.employeeId.toUpperCase() === cleanId);
+  };
+
   // Settings
   const updateCompanySettings = (settings: Partial<CompanySettings>) => {
     setCompanySettings(prev => ({ ...prev, ...settings }));
@@ -1309,6 +1466,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         attendance,
         leaves,
         payroll,
+        payslips,
+        uploadPayslip,
+        updatePayslip,
+        deletePayslip,
+        replacePayslipFile,
+        getPayslipsForEmployee,
         auditLogs,
         companySettings,
         notifications,
