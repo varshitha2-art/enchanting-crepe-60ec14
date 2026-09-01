@@ -175,6 +175,65 @@ export interface PayrollRecord {
   ifsc: string;
 }
 
+export interface PayslipRecord {
+  id: string;
+  employeeId: string;
+  employeeName: string;
+  designation: string;
+  department: string;
+  siteName: string;
+  month: string; // e.g. "August"
+  year: number; // e.g. 2026
+  monthYear: string; // e.g. "August 2026"
+  uploadedAt: string; // e.g. "2026-08-31 10:30 AM"
+  uploadedBy: string; // "VPHS Super Admin"
+  fileUrl?: string; // Data URL or storage path for PDF / JPG / PNG
+  fileName?: string; // e.g. "VPHS_Payslip_VPHS0040_Aug2026.pdf"
+  fileType: 'PDF' | 'JPG' | 'JPEG' | 'PNG' | 'DOCUMENT';
+  fileSize?: string; // e.g. "245 KB"
+
+  // Working Days Particulars
+  workingDays: number; // e.g. 26
+  presentDays: number; // e.g. 25
+  lopDays: number; // e.g. 1
+
+  // Reference Salary Components:
+  basicSalary: number; // 6,000
+  vda: number; // 10,000 (Variable Dearness Allowance)
+  hra: number; // 6,783
+  washingAllowance: number; // 200
+  otherAllowances: number; // 650
+  grossSalary: number; // Gross (A) = 23,633
+
+  // Employer Contributions:
+  employerPf: number; // 1,800
+  employerEsi: number; // 520
+  ctc: number; // CTC (B) = 25,953
+
+  // Employee Deductions:
+  epfDeduction: number; // Employee PF = 1,800
+  esiDeduction: number; // Employee ESI = 120
+  ptDeduction: number; // PT = 200
+  otherDeductions: number; // e.g. 0
+  totalDeductions: number; // Deductions (C) = 2,120
+
+  // Net Take-Home Pay:
+  netPay: number; // Net Salary (A - C) = 21,513
+
+  // Banking & Statutory Info
+  bankAc: string;
+  ifsc: string;
+  bankName: string;
+  uan: string;
+  pfNo: string;
+  esiNo: string;
+  pan: string;
+  aadhar: string;
+  status: 'Processed' | 'Approved' | 'Disbursed';
+  disbursedOn?: string;
+  remarks?: string;
+}
+
 export interface MediaItem {
   id: string;
   name: string;
