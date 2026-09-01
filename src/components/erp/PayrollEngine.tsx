@@ -29,11 +29,15 @@ import {
   User,
   Paperclip,
   ExternalLink,
-  Sliders
+  Sliders,
+  Zap,
+  CheckCheck,
+  ArrowUpDown
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { PayslipRecord, Role } from '../../types';
 import { calculateSalarySummary } from '../../data/initialPayslips';
+import { AUGUST_2026_ATTENDANCE_DATA } from '../../data/monthlyAttendanceData';
 
 export const PayrollEngine: React.FC = () => {
   const {
@@ -43,6 +47,7 @@ export const PayrollEngine: React.FC = () => {
     deletePayslip,
     replacePayslipFile,
     employees,
+    sites,
     currentUser,
     companySettings,
     showToast,
@@ -53,6 +58,7 @@ export const PayrollEngine: React.FC = () => {
   const isSuperAdmin = role === 'SUPER_ADMIN' || role === 'HR_ADMIN';
 
   // Filters
+  const [selectedSiteFilter, setSelectedSiteFilter] = useState<string>('all');
   const [selectedEmpFilter, setSelectedEmpFilter] = useState<string>('all');
   const [selectedMonthFilter, setSelectedMonthFilter] = useState<string>('all');
   const [selectedYearFilter, setSelectedYearFilter] = useState<string>('2026');
@@ -67,12 +73,20 @@ export const PayrollEngine: React.FC = () => {
   const [targetReplaceRecord, setTargetReplaceRecord] = useState<PayslipRecord | null>(null);
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
 
+  // Batch Site Attendance Generator Modal State
+  const [batchSiteModalOpen, setBatchSiteModalOpen] = useState(false);
+  const [batchSiteName, setBatchSiteName] = useState<string>('Microsoft India (R & D) Pvt. Ltd');
+  const [batchMonth, setBatchMonth] = useState<string>('August');
+  const [batchYear, setBatchYear] = useState<number>(2026);
+  const [isBatchGenerating, setIsBatchGenerating] = useState(false);
+
   // Person-Specific Edit Modal State
   const [editModalOpen, setEditModalOpen] = useState(false);
   const [editingRecord, setEditingRecord] = useState<PayslipRecord | null>(null);
   const [editFile, setEditFile] = useState<File | null>(null);
 
   // Upload Form State
+  const [uploadSite, setUploadSite] = useState<string>('Microsoft India (R & D) Pvt. Ltd');
   const [uploadEmpId, setUploadEmpId] = useState<string>('VPHS0040');
   const [uploadMonth, setUploadMonth] = useState<string>('August');
   const [uploadYear, setUploadYear] = useState<number>(2026);
@@ -80,26 +94,82 @@ export const PayrollEngine: React.FC = () => {
   const [filePreviewUrl, setFilePreviewUrl] = useState<string>('');
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  // Salary Breakdown Input State (Reference defaults from user prompt)
-  const [salaryInputs, setSalaryInputs] = useState({
-    basicSalary: 6000,
-    vda: 10000,
-    hra: 6783,
-    washingAllowance: 200,
-    otherAllowances: 650,
-    employerPf: 1800,
-    employerEsi: 520,
-    epfDeduction: 1800,
-    esiDeduction: 120,
-    ptDeduction: 200,
-    otherDeductions: 0,
-    workingDays: 26,
-    presentDays: 25,
-    lopDays: 1,
-    remarks: ''
-  });
+  // Helper: Attendance Lookup for a Person
+  const getAttendanceMetricsForEmp = (empId: string, month: string = 'August') => {
+    const cleanId = (empId || '').toUpperCase().trim();
+    const match = AUGUST_2026_ATTENDANCE_DATA.find(
+      a => a.empId.toUpperCase() === cleanId || a.name.toLowerCase().includes(cleanId.toLowerCase())
+    );
+    if (match) {
+      return {
+        totalDays: match.totalDays || 31,
+        totalPresent: match.totalPresent || 20,
+        weeklyOff: match.weeklyOff || 10,
+        totalLeaves: match.totalLeaves || 0,
+        absent: match.absent || 1,
+        paidDays: (match.totalPresent || 20) + (match.weeklyOff || 10) + (match.totalLeaves || 0),
+        percentage: match.percentage || 96.8,
+        siteUnit: match.siteUnit || 'Microsoft India (R & D) Pvt. Ltd'
+      };
+    }
+    return {
+      totalDays: 31,
+      totalPresent: 21,
+      weeklyOff: 10,
+      totalLeaves: 0,
+      absent: 0,
+      paidDays: 31,
+      percentage: 100,
+      siteUnit: 'Microsoft India (R & D) Pvt. Ltd'
+    };
+  };
 
-  // Calculate live totals for the upload form
+  // Helper: Calculate Salary Pro-Rated As Per Attendance
+  const calculateAttendanceSalary = (empId: string, month: string = 'August') => {
+    const att = getAttendanceMetricsForEmp(empId, month);
+    const ratio = Math.min(Math.max(att.paidDays / att.totalDays, 0.5), 1.0);
+
+    const baseBasic = 6000;
+    const baseVda = 10000;
+    const baseHra = 6783;
+    const baseWashing = 200;
+    const baseOther = 650;
+
+    const proBasic = Math.round(baseBasic * ratio);
+    const proVda = Math.round(baseVda * ratio);
+    const proHra = Math.round(baseHra * ratio);
+    const proWashing = Math.round(baseWashing * ratio);
+    const proOther = Math.round(baseOther * ratio);
+
+    const proEmpPf = Math.min(Math.round((proBasic + proVda) * 0.12), 1800);
+    const grossEst = proBasic + proVda + proHra + proWashing + proOther;
+    const proEmpEsi = grossEst <= 21000 ? Math.round(grossEst * 0.0075) : 120;
+    const proEmplrPf = Math.min(Math.round((proBasic + proVda) * 0.12), 1800);
+    const proEmplrEsi = grossEst <= 21000 ? Math.round(grossEst * 0.0325) : 520;
+
+    return {
+      basicSalary: proBasic,
+      vda: proVda,
+      hra: proHra,
+      washingAllowance: proWashing,
+      otherAllowances: proOther,
+      employerPf: proEmplrPf,
+      employerEsi: proEmplrEsi,
+      epfDeduction: proEmpPf,
+      esiDeduction: proEmpEsi,
+      ptDeduction: 200,
+      otherDeductions: 0,
+      workingDays: att.totalDays,
+      presentDays: att.paidDays,
+      lopDays: att.absent,
+      remarks: `Generated as per ${month} Attendance SLA (${att.percentage}% - ${att.paidDays}/${att.totalDays} Paid Days at ${att.siteUnit})`
+    };
+  };
+
+  // Salary Breakdown Input State
+  const [salaryInputs, setSalaryInputs] = useState(() => calculateAttendanceSalary('VPHS0040', 'August'));
+
+  // Calculate live totals for upload form
   const liveTotals = calculateSalarySummary(
     salaryInputs.basicSalary,
     salaryInputs.vda,
@@ -114,7 +184,7 @@ export const PayrollEngine: React.FC = () => {
     salaryInputs.employerEsi
   );
 
-  // Calculate live totals for the edit modal
+  // Calculate live totals for edit modal
   const editTotals = editingRecord
     ? calculateSalarySummary(
         editingRecord.basicSalary || 0,
@@ -143,8 +213,13 @@ export const PayrollEngine: React.FC = () => {
     scopedPayslips = payslips.filter(p => p.employeeId.toUpperCase() === userEmpId);
   }
 
-  // 2. Apply Filters & Search
+  // 2. Apply Filters & Search (Site, Employee, Month, Year, Query)
   const filteredPayslips = scopedPayslips.filter(p => {
+    // Site filter (Admin only)
+    if (isSuperAdmin && selectedSiteFilter !== 'all') {
+      const matchSite = p.siteName.toLowerCase().includes(selectedSiteFilter.toLowerCase());
+      if (!matchSite) return false;
+    }
     // Employee filter (Admin only)
     if (isSuperAdmin && selectedEmpFilter !== 'all' && p.employeeId.toUpperCase() !== selectedEmpFilter.toUpperCase()) {
       return false;
@@ -200,27 +275,24 @@ export const PayrollEngine: React.FC = () => {
   const handleOpenUploadModal = () => {
     setSelectedFile(null);
     setFilePreviewUrl('');
-    setUploadEmpId(employees[0]?.id || 'VPHS0040');
+    const firstEmp = employees[0]?.id || 'VPHS0040';
+    setUploadEmpId(firstEmp);
     setUploadMonth('August');
     setUploadYear(2026);
-    setSalaryInputs({
-      basicSalary: 6000,
-      vda: 10000,
-      hra: 6783,
-      washingAllowance: 200,
-      otherAllowances: 650,
-      employerPf: 1800,
-      employerEsi: 520,
-      epfDeduction: 1800,
-      esiDeduction: 120,
-      ptDeduction: 200,
-      otherDeductions: 0,
-      workingDays: 26,
-      presentDays: 25,
-      lopDays: 1,
-      remarks: ''
-    });
+    const empObj = employees.find(e => e.id === firstEmp);
+    setUploadSite(empObj?.siteUnit || 'Microsoft India (R & D) Pvt. Ltd');
+    setSalaryInputs(calculateAttendanceSalary(firstEmp, 'August'));
     setUploadModalOpen(true);
+  };
+
+  // When Employee Changes in Upload Modal, sync site and auto-calculate as per attendance
+  const handleUploadEmpChange = (empId: string) => {
+    setUploadEmpId(empId);
+    const empObj = employees.find(e => e.id.toUpperCase() === empId.toUpperCase());
+    if (empObj?.siteUnit) {
+      setUploadSite(empObj.siteUnit);
+    }
+    setSalaryInputs(calculateAttendanceSalary(empId, uploadMonth));
   };
 
   // Open Person-Specific Edit Modal
@@ -228,6 +300,17 @@ export const PayrollEngine: React.FC = () => {
     setEditingRecord(JSON.parse(JSON.stringify(payslip)));
     setEditFile(null);
     setEditModalOpen(true);
+  };
+
+  // Sync Edit Modal Salary With Attendance
+  const handleSyncEditWithAttendance = () => {
+    if (!editingRecord) return;
+    const attSalary = calculateAttendanceSalary(editingRecord.employeeId, editingRecord.month);
+    setEditingRecord({
+      ...editingRecord,
+      ...attSalary
+    });
+    showToast(`Synced ${editingRecord.employeeName}'s salary with ${editingRecord.month} attendance records!`, 'info');
   };
 
   // Submit Upload Form
@@ -242,7 +325,7 @@ export const PayrollEngine: React.FC = () => {
     const empName = emp?.name || `Employee ${uploadEmpId}`;
     const desig = emp?.designation || 'Valet Operations Associate';
     const dept = emp?.department || 'Facility Management';
-    const site = emp?.siteUnit || 'Microsoft India (R & D) Pvt. Ltd';
+    const site = uploadSite || emp?.siteUnit || 'Microsoft India (R & D) Pvt. Ltd';
     const bankAc = emp?.bankAc || '921020048291039';
     const ifsc = emp?.ifsc || 'HDFC0000240';
     const bankName = emp?.bankName || 'HDFC Bank Ltd.';
@@ -321,6 +404,101 @@ export const PayrollEngine: React.FC = () => {
       showToast('Failed to update payslip.', 'error');
     } finally {
       setIsSubmitting(false);
+    }
+  };
+
+  // Batch Site Attendance Payroll Generator
+  const handleRunBatchSitePayroll = async () => {
+    setIsBatchGenerating(true);
+    try {
+      // Find all employees belonging to batchSiteName
+      const siteEmployees = employees.filter(
+        e => batchSiteName === 'All Sites' || e.siteUnit?.toLowerCase().includes(batchSiteName.toLowerCase())
+      );
+
+      let processedCount = 0;
+      for (const emp of siteEmployees) {
+        const attSalary = calculateAttendanceSalary(emp.id, batchMonth);
+        const totals = calculateSalarySummary(
+          attSalary.basicSalary,
+          attSalary.vda,
+          attSalary.hra,
+          attSalary.washingAllowance,
+          attSalary.otherAllowances,
+          attSalary.epfDeduction,
+          attSalary.esiDeduction,
+          attSalary.ptDeduction,
+          0,
+          attSalary.employerPf,
+          attSalary.employerEsi
+        );
+
+        // Check if payslip already exists for this person + monthYear
+        const existing = payslips.find(
+          p => p.employeeId.toUpperCase() === emp.id.toUpperCase() && p.month === batchMonth && p.year === batchYear
+        );
+
+        if (existing) {
+          await updatePayslip(existing.id, {
+            ...attSalary,
+            grossSalary: totals.grossSalary,
+            totalDeductions: totals.totalDeductions,
+            netPay: totals.netPay,
+            ctc: totals.ctc,
+            siteName: emp.siteUnit || batchSiteName
+          });
+        } else {
+          await uploadPayslip({
+            employeeId: emp.id,
+            employeeName: emp.name,
+            designation: emp.designation,
+            department: emp.department || 'Facility Management',
+            siteName: emp.siteUnit || batchSiteName,
+            month: batchMonth,
+            year: batchYear,
+            monthYear: `${batchMonth} ${batchYear}`,
+            fileType: 'DOCUMENT',
+            fileName: `VPHS_Payslip_${emp.id}_${batchMonth}_${batchYear}.pdf`,
+            workingDays: attSalary.workingDays,
+            presentDays: attSalary.presentDays,
+            lopDays: attSalary.lopDays,
+            basicSalary: attSalary.basicSalary,
+            vda: attSalary.vda,
+            hra: attSalary.hra,
+            washingAllowance: attSalary.washingAllowance,
+            otherAllowances: attSalary.otherAllowances,
+            grossSalary: totals.grossSalary,
+            employerPf: totals.employerPf,
+            employerEsi: totals.employerEsi,
+            ctc: totals.ctc,
+            epfDeduction: totals.epfDeduction,
+            esiDeduction: totals.esiDeduction,
+            ptDeduction: totals.ptDeduction,
+            otherDeductions: 0,
+            totalDeductions: totals.totalDeductions,
+            netPay: totals.netPay,
+            bankAc: emp.bankAc,
+            ifsc: emp.ifsc,
+            bankName: emp.bankName,
+            uan: emp.uan,
+            pfNo: emp.pfNo,
+            esiNo: emp.esiNo,
+            pan: emp.pan,
+            aadhar: emp.aadhar,
+            status: 'Disbursed',
+            disbursedOn: new Date().toISOString().split('T')[0],
+            remarks: attSalary.remarks
+          });
+        }
+        processedCount++;
+      }
+
+      showToast(`Generated & updated ${processedCount} attendance-linked payslips for ${batchSiteName}!`, 'success');
+      setBatchSiteModalOpen(false);
+    } catch (err) {
+      showToast('Batch payroll generation encountered an issue.', 'error');
+    } finally {
+      setIsBatchGenerating(false);
     }
   };
 
@@ -406,6 +584,17 @@ export const PayrollEngine: React.FC = () => {
     'July', 'August', 'September', 'October', 'November', 'December'
   ];
 
+  // Unique client sites list
+  const SITE_OPTIONS = [
+    'All Sites',
+    'Microsoft India (R & D) Pvt. Ltd',
+    'Amazon Development Centre',
+    'Third Wave Coffee Roasters',
+    'DivyaSree NSL Orion SEZ',
+    'Google Signature Tower',
+    'L&T Infotech Park'
+  ];
+
   return (
     <div className="space-y-6">
       {/* 1. Header Banner & Action Bar */}
@@ -418,7 +607,7 @@ export const PayrollEngine: React.FC = () => {
               ₹
             </div>
             <h2 className="text-xl font-black text-white">
-              {isSuperAdmin ? 'Super Admin Payslip Management & Person Customization' : 'My Payslips & Compensation Portal'}
+              {isSuperAdmin ? 'Attendance-Linked Payslip Engine & Site Manager' : 'My Payslips & Compensation Portal'}
             </h2>
             <span className="px-2.5 py-0.5 rounded-full bg-amber-500/20 text-amber-400 text-xs font-mono font-bold border border-amber-500/30">
               {selectedYearFilter}
@@ -426,7 +615,7 @@ export const PayrollEngine: React.FC = () => {
           </div>
           <p className="text-xs text-slate-400 max-w-2xl">
             {isSuperAdmin
-              ? 'Upload, edit individual person salary components, replace files, and manage statutory employee payslips (PDF, JPG, PNG) with full customization.'
+              ? 'Generate payslips dynamically as per actual monthly attendance, select client sites, and customize individual person salary components with full editable access.'
               : `Official computerized wage slips for ${currentUser?.name || 'Employee'}. View and download your monthly compensation and statutory contribution records.`}
           </p>
         </div>
@@ -435,12 +624,22 @@ export const PayrollEngine: React.FC = () => {
         <div className="flex flex-wrap items-center gap-3 relative z-10">
           {isSuperAdmin && (
             <>
+              {/* Batch Site Attendance Generator Button */}
+              <button
+                onClick={() => setBatchSiteModalOpen(true)}
+                className="px-4 py-2.5 bg-gradient-to-r from-sky-500 to-blue-600 hover:from-sky-400 hover:to-blue-500 text-slate-950 rounded-xl font-extrabold text-xs shadow-md transition-all hover:scale-105 flex items-center gap-2 cursor-pointer"
+              >
+                <Zap className="w-4 h-4 text-slate-950" />
+                <span>⚡ Generate from Site Attendance</span>
+              </button>
+
+              {/* Upload / Single Generator Button */}
               <button
                 onClick={handleOpenUploadModal}
                 className="px-4 py-2.5 bg-gradient-to-r from-amber-500 via-amber-400 to-amber-500 hover:from-amber-400 hover:to-amber-300 text-slate-950 rounded-xl font-extrabold text-xs shadow-gold-sm transition-all hover:scale-105 flex items-center gap-2 cursor-pointer"
               >
                 <Upload className="w-4 h-4" />
-                <span>Upload Employee Payslip</span>
+                <span>+ Upload / Add Person Payslip</span>
               </button>
 
               <button
@@ -469,9 +668,11 @@ export const PayrollEngine: React.FC = () => {
       {isSuperAdmin && (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
           <div className="p-5 rounded-2xl bg-[#0b1329] border border-[#1f2f58] space-y-1 shadow">
-            <span className="text-[11px] font-bold text-amber-400 uppercase tracking-wider block">Uploaded Payslips</span>
+            <span className="text-[11px] font-bold text-amber-400 uppercase tracking-wider block">Filtered Payslips</span>
             <div className="text-2xl font-black text-white font-mono">{filteredPayslips.length} Records</div>
-            <p className="text-[11px] text-slate-400">{employees.length} Authorized Staff Accounts</p>
+            <p className="text-[11px] text-slate-400">
+              {selectedSiteFilter === 'all' ? 'All Client Campuses' : selectedSiteFilter}
+            </p>
           </div>
 
           <div className="p-5 rounded-2xl bg-[#0b1329] border border-[#1f2f58] space-y-1 shadow">
@@ -527,19 +728,37 @@ export const PayrollEngine: React.FC = () => {
         </div>
       )}
 
-      {/* 4. Filters & Search Bar */}
+      {/* 4. Filters & Search Bar (Site, Employee, Month, Year) */}
       <div className="bg-[#0b1329] border border-[#1f2f58] rounded-2xl p-4 shadow-lg flex flex-col md:flex-row items-stretch md:items-center justify-between gap-4">
         <div className="flex flex-wrap items-center gap-3">
+          {/* Site Selector (Super Admin Only) */}
+          {isSuperAdmin && (
+            <div className="flex items-center gap-1.5 bg-[#070e1e] border border-[#1f2f58] rounded-xl px-2.5 py-1.5">
+              <Building2 className="w-3.5 h-3.5 text-amber-400" />
+              <select
+                value={selectedSiteFilter}
+                onChange={(e) => setSelectedSiteFilter(e.target.value)}
+                className="bg-transparent text-xs font-bold text-white focus:outline-none cursor-pointer max-w-[180px]"
+              >
+                {SITE_OPTIONS.map(s => (
+                  <option key={s} value={s === 'All Sites' ? 'all' : s} className="bg-slate-900 text-white">
+                    {s}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
           {/* Employee Selector (Super Admin Only) */}
           {isSuperAdmin && (
             <div className="flex items-center gap-1.5 bg-[#070e1e] border border-[#1f2f58] rounded-xl px-2.5 py-1.5">
-              <User className="w-3.5 h-3.5 text-amber-400" />
+              <User className="w-3.5 h-3.5 text-sky-400" />
               <select
                 value={selectedEmpFilter}
                 onChange={(e) => setSelectedEmpFilter(e.target.value)}
-                className="bg-transparent text-xs font-bold text-white focus:outline-none cursor-pointer"
+                className="bg-transparent text-xs font-bold text-white focus:outline-none cursor-pointer max-w-[180px]"
               >
-                <option value="all" className="bg-slate-900 text-white">All Employees ({employees.length})</option>
+                <option value="all" className="bg-slate-900 text-white">All Persons ({employees.length})</option>
                 {employees.map(emp => (
                   <option key={emp.id} value={emp.id} className="bg-slate-900 text-white">
                     {emp.id} - {emp.name}
@@ -551,7 +770,7 @@ export const PayrollEngine: React.FC = () => {
 
           {/* Month Selector */}
           <div className="flex items-center gap-1.5 bg-[#070e1e] border border-[#1f2f58] rounded-xl px-2.5 py-1.5">
-            <Calendar className="w-3.5 h-3.5 text-sky-400" />
+            <Calendar className="w-3.5 h-3.5 text-emerald-400" />
             <select
               value={selectedMonthFilter}
               onChange={(e) => setSelectedMonthFilter(e.target.value)}
@@ -580,11 +799,11 @@ export const PayrollEngine: React.FC = () => {
         </div>
 
         {/* Search Bar */}
-        <div className="relative w-full md:w-72">
+        <div className="relative w-full md:w-64">
           <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
           <input
             type="text"
-            placeholder="Search by ID, Name, Month..."
+            placeholder="Search person, site, ID..."
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             className="w-full bg-[#070e1e] border border-[#1f2f58] rounded-xl pl-9 pr-3 py-2 text-xs text-white focus:outline-none focus:border-amber-500 font-medium"
@@ -592,19 +811,19 @@ export const PayrollEngine: React.FC = () => {
         </div>
       </div>
 
-      {/* 5. Payslips Table & Cards */}
+      {/* 5. Payslips Table */}
       <div className="bg-[#0b1329] border border-[#1f2f58] rounded-3xl overflow-hidden shadow-2xl">
         <div className="overflow-x-auto">
           <table className="w-full text-left text-xs text-slate-300">
             <thead className="bg-[#070e1e] text-slate-400 font-bold uppercase text-[10px] tracking-wider border-b border-[#1f2f58]">
               <tr>
-                <th className="px-4 py-3.5">Employee ID & Name</th>
-                <th className="px-4 py-3.5">Salary Period</th>
+                <th className="px-4 py-3.5">Employee & ID</th>
+                <th className="px-4 py-3.5">Client Site / Campus</th>
+                <th className="px-4 py-3.5">Period & Days</th>
                 <th className="px-4 py-3.5">Gross (A)</th>
                 <th className="px-4 py-3.5">Deductions (C)</th>
-                <th className="px-4 py-3.5">Net Take-Home (A-C)</th>
-                <th className="px-4 py-3.5">Attached Payslip File</th>
-                <th className="px-4 py-3.5">Upload Date</th>
+                <th className="px-4 py-3.5">Net Take-Home</th>
+                <th className="px-4 py-3.5">Attached File</th>
                 <th className="px-4 py-3.5 text-right">Actions</th>
               </tr>
             </thead>
@@ -613,15 +832,24 @@ export const PayrollEngine: React.FC = () => {
                 <tr>
                   <td colSpan={8} className="text-center py-12 text-slate-500">
                     <Receipt className="w-10 h-10 mx-auto text-slate-600 mb-2 opacity-50" />
-                    <p className="font-semibold text-slate-400">No payslips found matching your search or filters.</p>
+                    <p className="font-semibold text-slate-400">No payslips found matching your filters.</p>
                     {isSuperAdmin && (
-                      <button
-                        onClick={handleOpenUploadModal}
-                        className="mt-3 px-4 py-2 rounded-xl bg-amber-500 text-slate-950 font-bold text-xs shadow inline-flex items-center gap-1.5"
-                      >
-                        <Upload className="w-3.5 h-3.5" />
-                        <span>Upload First Payslip</span>
-                      </button>
+                      <div className="flex items-center justify-center gap-3 mt-3">
+                        <button
+                          onClick={() => setBatchSiteModalOpen(true)}
+                          className="px-4 py-2 rounded-xl bg-sky-500 text-slate-950 font-bold text-xs shadow inline-flex items-center gap-1.5"
+                        >
+                          <Zap className="w-3.5 h-3.5" />
+                          <span>Generate from Site Attendance</span>
+                        </button>
+                        <button
+                          onClick={handleOpenUploadModal}
+                          className="px-4 py-2 rounded-xl bg-amber-500 text-slate-950 font-bold text-xs shadow inline-flex items-center gap-1.5"
+                        >
+                          <Upload className="w-3.5 h-3.5" />
+                          <span>Add Individual Payslip</span>
+                        </button>
+                      </div>
                     )}
                   </td>
                 </tr>
@@ -639,17 +867,33 @@ export const PayrollEngine: React.FC = () => {
                             <span className="font-mono font-bold text-amber-400">{payslip.employeeId}</span>
                             <span className="text-white font-bold">{payslip.employeeName}</span>
                           </div>
-                          <p className="text-[10px] text-slate-400">{payslip.designation} • {payslip.siteName}</p>
+                          <p className="text-[10px] text-slate-400">{payslip.designation}</p>
                         </div>
                       </div>
                     </td>
 
-                    {/* Period */}
+                    {/* Client Site */}
                     <td className="px-4 py-3.5">
-                      <span className="px-2.5 py-1 rounded-full bg-slate-900 border border-[#1f2f58] font-bold text-slate-200 text-xs inline-flex items-center gap-1">
-                        <Calendar className="w-3 h-3 text-amber-400" />
-                        {payslip.monthYear}
-                      </span>
+                      <div className="flex items-center gap-1 text-slate-200">
+                        <Building2 className="w-3.5 h-3.5 text-amber-400 flex-shrink-0" />
+                        <span className="font-medium truncate max-w-[160px]" title={payslip.siteName}>
+                          {payslip.siteName}
+                        </span>
+                      </div>
+                    </td>
+
+                    {/* Period & Attendance Days */}
+                    <td className="px-4 py-3.5">
+                      <div>
+                        <span className="px-2 py-0.5 rounded-full bg-slate-900 border border-[#1f2f58] font-bold text-slate-200 text-[11px] inline-flex items-center gap-1">
+                          <Calendar className="w-3 h-3 text-sky-400" />
+                          {payslip.monthYear}
+                        </span>
+                        <div className="text-[10px] text-emerald-400 font-mono mt-0.5">
+                          {payslip.presentDays || 25} Paid / {payslip.workingDays || 31} Days
+                          {payslip.lopDays ? <span className="text-rose-400 ml-1">({payslip.lopDays} LOP)</span> : null}
+                        </div>
+                      </div>
                     </td>
 
                     {/* Gross */}
@@ -680,16 +924,10 @@ export const PayrollEngine: React.FC = () => {
                         }`}>
                           {payslip.fileType}
                         </span>
-                        <span className="text-slate-300 text-[11px] font-mono truncate max-w-[140px]" title={payslip.fileName}>
-                          {payslip.fileName || 'Computerized Slip'}
+                        <span className="text-slate-300 text-[11px] font-mono truncate max-w-[120px]" title={payslip.fileName}>
+                          {payslip.fileName || 'Computerized'}
                         </span>
                       </div>
-                      <span className="text-[10px] text-slate-500 block">{payslip.fileSize || 'Standard'}</span>
-                    </td>
-
-                    {/* Upload Date */}
-                    <td className="px-4 py-3.5 text-[11px] text-slate-400 font-mono">
-                      {payslip.uploadedAt}
                     </td>
 
                     {/* Actions */}
@@ -762,7 +1000,138 @@ export const PayrollEngine: React.FC = () => {
       </div>
 
       {/* ========================================================================= */}
-      {/* MODAL 1: SUPER ADMIN UPLOAD PAYSLIP MODAL                                  */}
+      {/* MODAL 1: BATCH SITE ATTENDANCE PAYSLIP GENERATOR (SUPER ADMIN)             */}
+      {/* ========================================================================= */}
+      {batchSiteModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/85 backdrop-blur-md animate-in fade-in overflow-y-auto">
+          <div className="bg-[#0b1329] border border-sky-500/40 rounded-3xl w-full max-w-2xl shadow-2xl p-6 sm:p-8 space-y-6 my-8">
+            <div className="flex items-center justify-between pb-4 border-b border-[#1f2f58]">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-2xl bg-sky-500/20 text-sky-400 flex items-center justify-center border border-sky-500/30">
+                  <Zap className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-white">Generate Payslips as per Site Attendance</h3>
+                  <p className="text-xs text-slate-400">Select site & month to generate payslips computed from actual attendance</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setBatchSiteModalOpen(false)}
+                className="p-1.5 rounded-xl text-slate-400 hover:text-white bg-slate-900 border border-[#1f2f58] cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="space-y-4">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 bg-[#070e1e] p-4 rounded-2xl border border-[#1f2f58] text-xs">
+                <div>
+                  <label className="block text-slate-400 uppercase font-bold mb-1">Select Client Site</label>
+                  <select
+                    value={batchSiteName}
+                    onChange={(e) => setBatchSiteName(e.target.value)}
+                    className="w-full bg-[#0b1329] border border-[#1f2f58] rounded-xl px-3 py-2 text-white font-bold cursor-pointer"
+                  >
+                    {SITE_OPTIONS.map(s => (
+                      <option key={s} value={s} className="bg-slate-900">{s}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-slate-400 uppercase font-bold mb-1">Attendance Month</label>
+                  <select
+                    value={batchMonth}
+                    onChange={(e) => setBatchMonth(e.target.value)}
+                    className="w-full bg-[#0b1329] border border-[#1f2f58] rounded-xl px-3 py-2 text-white font-bold cursor-pointer"
+                  >
+                    {MONTH_NAMES.map(m => (
+                      <option key={m} value={m} className="bg-slate-900">{m}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-slate-400 uppercase font-bold mb-1">Year</label>
+                  <select
+                    value={batchYear}
+                    onChange={(e) => setBatchYear(Number(e.target.value))}
+                    className="w-full bg-[#0b1329] border border-[#1f2f58] rounded-xl px-3 py-2 text-white font-bold cursor-pointer"
+                  >
+                    <option value={2026} className="bg-slate-900">2026</option>
+                    <option value={2025} className="bg-slate-900">2025</option>
+                  </select>
+                </div>
+              </div>
+
+              {/* Attendance Preview Table */}
+              <div className="bg-[#070e1e] p-4 rounded-2xl border border-[#1f2f58] space-y-2">
+                <div className="flex items-center justify-between text-xs font-bold text-amber-400 uppercase tracking-wider">
+                  <span>Site Attendance Preview</span>
+                  <span className="text-[10px] text-slate-400 font-mono">
+                    {employees.filter(e => batchSiteName === 'All Sites' || e.siteUnit?.toLowerCase().includes(batchSiteName.toLowerCase())).length} Deployed Personnel
+                  </span>
+                </div>
+
+                <div className="max-h-48 overflow-y-auto space-y-1.5 pr-1">
+                  {employees
+                    .filter(e => batchSiteName === 'All Sites' || e.siteUnit?.toLowerCase().includes(batchSiteName.toLowerCase()))
+                    .map(emp => {
+                      const att = getAttendanceMetricsForEmp(emp.id, batchMonth);
+                      return (
+                        <div key={emp.id} className="p-2.5 rounded-xl bg-[#0b1329] border border-[#1f2f58] flex items-center justify-between text-xs">
+                          <div>
+                            <span className="font-mono text-amber-400 font-bold">{emp.id}</span> • <span className="font-bold text-white">{emp.name}</span>
+                            <div className="text-[10px] text-slate-400">{emp.designation}</div>
+                          </div>
+                          <div className="text-right">
+                            <span className="font-mono text-emerald-400 font-bold">{att.paidDays} / {att.totalDays} Days ({att.percentage}%)</span>
+                            {att.absent > 0 && <span className="text-[10px] text-rose-400 block font-mono">{att.absent} LOP</span>}
+                          </div>
+                        </div>
+                      );
+                    })}
+                </div>
+              </div>
+
+              <div className="p-3 bg-sky-950/40 border border-sky-500/30 rounded-2xl text-xs text-sky-200 flex items-start gap-2">
+                <Sparkles className="w-4 h-4 text-sky-400 flex-shrink-0 mt-0.5" />
+                <span>
+                  Every generated payslip is pro-rated as per actual attendance and can subsequently be customized individually with full editable access per person.
+                </span>
+              </div>
+            </div>
+
+            <div className="pt-4 border-t border-[#1f2f58] flex justify-end gap-3">
+              <button
+                type="button"
+                onClick={() => setBatchSiteModalOpen(false)}
+                className="px-4 py-2.5 rounded-xl bg-slate-900 text-slate-300 font-bold text-xs cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleRunBatchSitePayroll}
+                disabled={isBatchGenerating}
+                className="px-6 py-2.5 bg-gradient-to-r from-sky-500 to-blue-600 hover:from-sky-400 hover:to-blue-500 text-slate-950 rounded-xl font-extrabold text-xs shadow flex items-center gap-2 cursor-pointer"
+              >
+                {isBatchGenerating ? (
+                  <span>Generating Payslips...</span>
+                ) : (
+                  <>
+                    <Zap className="w-4 h-4 text-slate-950" />
+                    <span>Run Site Attendance Payroll</span>
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================= */}
+      {/* MODAL 2: UPLOAD & GENERATE PAYSLIP FOR A PERSON                            */}
       {/* ========================================================================= */}
       {uploadModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/85 backdrop-blur-md animate-in fade-in overflow-y-auto">
@@ -774,8 +1143,8 @@ export const PayrollEngine: React.FC = () => {
                   <Upload className="w-5 h-5" />
                 </div>
                 <div>
-                  <h3 className="text-base font-bold text-white">Upload & Publish Employee Payslip</h3>
-                  <p className="text-xs text-slate-400">Select employee, attach PDF/JPG/PNG file, and verify salary components</p>
+                  <h3 className="text-base font-bold text-white">Generate / Upload Person Payslip</h3>
+                  <p className="text-xs text-slate-400">Select person, site, auto-fill from attendance, or attach external file</p>
                 </div>
               </div>
               <button
@@ -787,18 +1156,18 @@ export const PayrollEngine: React.FC = () => {
             </div>
 
             <form onSubmit={handleSubmitUpload} className="space-y-5">
-              {/* Step 1: Employee & Period Selectors */}
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 bg-[#070e1e] p-4 rounded-2xl border border-[#1f2f58]">
-                {/* Employee Selector */}
-                <div className="sm:col-span-1 space-y-1">
+              {/* Person & Site Selectors */}
+              <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 bg-[#070e1e] p-4 rounded-2xl border border-[#1f2f58]">
+                {/* Person */}
+                <div className="sm:col-span-2 space-y-1">
                   <label className="block text-xs font-bold text-slate-300 uppercase tracking-wider">
-                    Select Employee ID <span className="text-rose-400">*</span>
+                    Select Person <span className="text-rose-400">*</span>
                   </label>
                   <select
                     value={uploadEmpId}
-                    onChange={(e) => setUploadEmpId(e.target.value)}
+                    onChange={(e) => handleUploadEmpChange(e.target.value)}
                     required
-                    className="w-full bg-[#0b1329] border border-[#1f2f58] rounded-xl px-3 py-2.5 text-xs text-white focus:outline-none focus:border-amber-500 font-bold cursor-pointer"
+                    className="w-full bg-[#0b1329] border border-[#1f2f58] rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-amber-500 font-bold cursor-pointer"
                   >
                     {employees.map(emp => (
                       <option key={emp.id} value={emp.id} className="bg-slate-900">
@@ -808,15 +1177,18 @@ export const PayrollEngine: React.FC = () => {
                   </select>
                 </div>
 
-                {/* Month Selector */}
+                {/* Month */}
                 <div className="space-y-1">
                   <label className="block text-xs font-bold text-slate-300 uppercase tracking-wider">
-                    Salary Month <span className="text-rose-400">*</span>
+                    Month <span className="text-rose-400">*</span>
                   </label>
                   <select
                     value={uploadMonth}
-                    onChange={(e) => setUploadMonth(e.target.value)}
-                    className="w-full bg-[#0b1329] border border-[#1f2f58] rounded-xl px-3 py-2.5 text-xs text-white focus:outline-none focus:border-amber-500 font-bold cursor-pointer"
+                    onChange={(e) => {
+                      setUploadMonth(e.target.value);
+                      setSalaryInputs(calculateAttendanceSalary(uploadEmpId, e.target.value));
+                    }}
+                    className="w-full bg-[#0b1329] border border-[#1f2f58] rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-amber-500 font-bold cursor-pointer"
                   >
                     {MONTH_NAMES.map(m => (
                       <option key={m} value={m} className="bg-slate-900">{m}</option>
@@ -824,32 +1196,71 @@ export const PayrollEngine: React.FC = () => {
                   </select>
                 </div>
 
-                {/* Year Selector */}
+                {/* Year */}
                 <div className="space-y-1">
                   <label className="block text-xs font-bold text-slate-300 uppercase tracking-wider">
-                    Salary Year <span className="text-rose-400">*</span>
+                    Year <span className="text-rose-400">*</span>
                   </label>
                   <select
                     value={uploadYear}
                     onChange={(e) => setUploadYear(Number(e.target.value))}
-                    className="w-full bg-[#0b1329] border border-[#1f2f58] rounded-xl px-3 py-2.5 text-xs text-white focus:outline-none focus:border-amber-500 font-bold cursor-pointer"
+                    className="w-full bg-[#0b1329] border border-[#1f2f58] rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-amber-500 font-bold cursor-pointer"
                   >
                     <option value={2026} className="bg-slate-900">2026</option>
                     <option value={2025} className="bg-slate-900">2025</option>
-                    <option value={2024} className="bg-slate-900">2024</option>
+                  </select>
+                </div>
+
+                {/* Site Selection */}
+                <div className="sm:col-span-4 space-y-1 pt-1">
+                  <label className="block text-xs font-bold text-slate-300 uppercase tracking-wider">
+                    Assigned Site / Campus Unit
+                  </label>
+                  <select
+                    value={uploadSite}
+                    onChange={(e) => setUploadSite(e.target.value)}
+                    className="w-full bg-[#0b1329] border border-[#1f2f58] rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-amber-500 font-bold cursor-pointer"
+                  >
+                    {SITE_OPTIONS.filter(s => s !== 'All Sites').map(s => (
+                      <option key={s} value={s} className="bg-slate-900">{s}</option>
+                    ))}
                   </select>
                 </div>
               </div>
 
-              {/* Step 2: File Upload Drag & Drop Area */}
+              {/* Attendance Sync Callout */}
+              <div className="bg-amber-500/10 border border-amber-500/30 rounded-2xl p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-xs">
+                <div>
+                  <div className="flex items-center gap-1.5 font-bold text-amber-400">
+                    <Zap className="w-4 h-4" />
+                    <span>Attendance Computed for {uploadEmpId}</span>
+                  </div>
+                  <p className="text-slate-300 text-[11px] mt-0.5">
+                    {salaryInputs.presentDays} Paid Days ({salaryInputs.workingDays} Total Days) • {salaryInputs.lopDays} LOP Day
+                  </p>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSalaryInputs(calculateAttendanceSalary(uploadEmpId, uploadMonth));
+                    showToast('Re-applied attendance calculation!', 'info');
+                  }}
+                  className="px-3 py-1.5 rounded-xl bg-amber-500 text-slate-950 font-bold text-xs flex items-center gap-1 hover:bg-amber-400 cursor-pointer"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" />
+                  <span>Re-Compute Attendance</span>
+                </button>
+              </div>
+
+              {/* File Upload Box */}
               <div className="space-y-2">
                 <label className="block text-xs font-bold text-slate-300 uppercase tracking-wider">
-                  Attach Payslip File (PDF, JPG, JPEG, PNG)
+                  Optional: Attach External PDF / Image Payslip
                 </label>
-
                 <div
                   onClick={() => fileInputRef.current?.click()}
-                  className="border-2 border-dashed border-[#1f2f58] hover:border-amber-500 rounded-2xl p-6 text-center bg-[#070e1e] hover:bg-slate-900/60 transition-all cursor-pointer group"
+                  className="border-2 border-dashed border-[#1f2f58] hover:border-amber-500 rounded-2xl p-5 text-center bg-[#070e1e] hover:bg-slate-900/60 transition-all cursor-pointer group"
                 >
                   <input
                     type="file"
@@ -859,35 +1270,30 @@ export const PayrollEngine: React.FC = () => {
                     className="hidden"
                   />
                   {selectedFile ? (
-                    <div className="flex flex-col items-center gap-2">
-                      <div className="w-12 h-12 rounded-2xl bg-emerald-500/20 text-emerald-400 flex items-center justify-center border border-emerald-500/40">
-                        {selectedFile.type.includes('pdf') ? <FileText className="w-6 h-6" /> : <ImageIcon className="w-6 h-6" />}
+                    <div className="flex flex-col items-center gap-1.5">
+                      <div className="w-10 h-10 rounded-xl bg-emerald-500/20 text-emerald-400 flex items-center justify-center">
+                        {selectedFile.type.includes('pdf') ? <FileText className="w-5 h-5" /> : <ImageIcon className="w-5 h-5" />}
                       </div>
-                      <span className="text-sm font-bold text-white">{selectedFile.name}</span>
-                      <span className="text-xs text-emerald-400 font-mono">
-                        {(selectedFile.size / 1024).toFixed(1)} KB • Ready for secure upload
-                      </span>
+                      <span className="text-xs font-bold text-white">{selectedFile.name}</span>
+                      <span className="text-[10px] text-emerald-400 font-mono">{(selectedFile.size / 1024).toFixed(1)} KB</span>
                     </div>
                   ) : (
-                    <div className="flex flex-col items-center gap-2">
-                      <div className="w-12 h-12 rounded-2xl bg-slate-900 text-amber-400 flex items-center justify-center border border-[#1f2f58] group-hover:scale-110 transition-transform">
-                        <Upload className="w-6 h-6" />
-                      </div>
-                      <span className="text-xs font-bold text-white">Click or drag & drop to upload payslip file</span>
-                      <span className="text-[10px] text-slate-400">Supports PDF, JPG, JPEG, and PNG formats</span>
+                    <div className="flex flex-col items-center gap-1.5">
+                      <Upload className="w-5 h-5 text-amber-400 group-hover:scale-110 transition-transform" />
+                      <span className="text-xs font-bold text-white">Click or drag & drop to attach PDF/JPG/PNG (or leave empty for computerized slip)</span>
                     </div>
                   )}
                 </div>
               </div>
 
-              {/* Step 3: Reference Salary Breakdown (Live Computations) */}
+              {/* Salary Components Breakdown (Full Editable Access) */}
               <div className="space-y-3 bg-[#070e1e] p-5 rounded-2xl border border-[#1f2f58]">
                 <div className="flex items-center justify-between pb-2 border-b border-[#1f2f58]">
                   <span className="text-xs font-bold text-amber-400 uppercase tracking-wider flex items-center gap-1.5">
                     <Sparkles className="w-3.5 h-3.5" />
-                    Salary Components & Statutory Computations
+                    Editable Salary Breakdown (Customizable)
                   </span>
-                  <span className="text-[10px] text-slate-400 font-medium">Auto-computed per VPHS formula</span>
+                  <span className="text-[10px] text-slate-400">All fields editable</span>
                 </div>
 
                 {/* Earnings Row */}
@@ -939,7 +1345,7 @@ export const PayrollEngine: React.FC = () => {
                   </div>
                 </div>
 
-                {/* Deductions Row */}
+                {/* Deductions & Employer Contributions */}
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs pt-2 border-t border-[#1f2f58]/50">
                   <div>
                     <label className="block text-slate-400 text-[10px] uppercase font-bold mb-1">Emp. PF (₹)</label>
@@ -979,7 +1385,7 @@ export const PayrollEngine: React.FC = () => {
                   </div>
                 </div>
 
-                {/* Computation Summary Banner */}
+                {/* Computation Banner */}
                 <div className="grid grid-cols-3 gap-2 p-3 bg-slate-950 rounded-xl border border-[#1f2f58] text-center">
                   <div>
                     <span className="text-[10px] font-bold text-slate-400 block">Gross Salary (A)</span>
@@ -1015,7 +1421,7 @@ export const PayrollEngine: React.FC = () => {
                   ) : (
                     <>
                       <CheckCircle2 className="w-4 h-4" />
-                      <span>Save & Publish Payslip</span>
+                      <span>Save & Publish Person Payslip</span>
                     </>
                   )}
                 </button>
@@ -1026,7 +1432,7 @@ export const PayrollEngine: React.FC = () => {
       )}
 
       {/* ========================================================================= */}
-      {/* MODAL 2: PERSON-SPECIFIC PAYSLIP EDITOR MODAL (SUPER ADMIN ONLY)           */}
+      {/* MODAL 3: PERSON-SPECIFIC EDIT MODAL (WITH ATTENDANCE SYNC)                 */}
       {/* ========================================================================= */}
       {editModalOpen && editingRecord && editTotals && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/85 backdrop-blur-md animate-in fade-in overflow-y-auto">
@@ -1050,24 +1456,35 @@ export const PayrollEngine: React.FC = () => {
                     </span>
                   </div>
                   <p className="text-xs text-slate-400">
-                    Customize person-specific salary components, working days, bank particulars, and statutory deductions.
+                    Full editable access: modify salary numbers, attendance days, client site, and bank particulars.
                   </p>
                 </div>
               </div>
-              <button
-                onClick={() => setEditModalOpen(false)}
-                className="p-1.5 rounded-xl text-slate-400 hover:text-white bg-slate-900 border border-[#1f2f58] cursor-pointer"
-              >
-                <X className="w-5 h-5" />
-              </button>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleSyncEditWithAttendance}
+                  className="px-3 py-1.5 rounded-xl bg-sky-500/20 hover:bg-sky-500 text-sky-300 hover:text-slate-950 border border-sky-500/40 text-xs font-bold flex items-center gap-1.5 cursor-pointer transition-all"
+                >
+                  <Zap className="w-3.5 h-3.5" />
+                  <span>Sync with Attendance</span>
+                </button>
+                <button
+                  onClick={() => setEditModalOpen(false)}
+                  className="p-1.5 rounded-xl text-slate-400 hover:text-white bg-slate-900 border border-[#1f2f58] cursor-pointer"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
             </div>
 
             <form onSubmit={handleSubmitEdit} className="space-y-6">
-              {/* Section 1: Employee Particulars & Identification */}
+              {/* Section 1: Person Details & Client Site */}
               <div className="space-y-3 bg-[#070e1e] p-5 rounded-2xl border border-[#1f2f58]">
                 <h4 className="text-xs font-bold text-amber-400 uppercase tracking-wider flex items-center gap-1.5">
                   <User className="w-3.5 h-3.5" />
-                  1. Person Details & Employment Identity
+                  1. Person Details & Client Site Selection
                 </h4>
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
                   <div>
@@ -1089,13 +1506,16 @@ export const PayrollEngine: React.FC = () => {
                     />
                   </div>
                   <div>
-                    <label className="block text-slate-400 text-[10px] uppercase font-bold mb-1">Assigned Client Site</label>
-                    <input
-                      type="text"
+                    <label className="block text-slate-400 text-[10px] uppercase font-bold mb-1">Client Site / Campus</label>
+                    <select
                       value={editingRecord.siteName}
                       onChange={(e) => setEditingRecord({ ...editingRecord, siteName: e.target.value })}
-                      className="w-full bg-[#0b1329] border border-[#1f2f58] rounded-xl px-3 py-2 text-white focus:border-amber-500"
-                    />
+                      className="w-full bg-[#0b1329] border border-[#1f2f58] rounded-xl px-3 py-2 text-white font-bold cursor-pointer"
+                    >
+                      {SITE_OPTIONS.filter(s => s !== 'All Sites').map(s => (
+                        <option key={s} value={s} className="bg-slate-900">{s}</option>
+                      ))}
+                    </select>
                   </div>
                   <div>
                     <label className="block text-slate-400 text-[10px] uppercase font-bold mb-1">Bank Account No.</label>
@@ -1127,15 +1547,15 @@ export const PayrollEngine: React.FC = () => {
                 </div>
               </div>
 
-              {/* Section 2: Attendance & Working Days Particulars */}
+              {/* Section 2: Attendance Days Particulars */}
               <div className="space-y-3 bg-[#070e1e] p-5 rounded-2xl border border-[#1f2f58]">
                 <h4 className="text-xs font-bold text-sky-400 uppercase tracking-wider flex items-center gap-1.5">
                   <Calendar className="w-3.5 h-3.5" />
-                  2. Attendance Days for {editingRecord.monthYear}
+                  2. Attendance Days (As per {editingRecord.monthYear})
                 </h4>
                 <div className="grid grid-cols-3 gap-3 text-xs">
                   <div>
-                    <label className="block text-slate-400 text-[10px] uppercase font-bold mb-1">Total Month Working Days</label>
+                    <label className="block text-slate-400 text-[10px] uppercase font-bold mb-1">Total Month Days</label>
                     <input
                       type="number"
                       value={editingRecord.workingDays}
@@ -1361,7 +1781,7 @@ export const PayrollEngine: React.FC = () => {
       )}
 
       {/* ========================================================================= */}
-      {/* MODAL 3: SUPER ADMIN REPLACE FILE MODAL                                    */}
+      {/* MODAL 4: SUPER ADMIN REPLACE FILE MODAL                                    */}
       {/* ========================================================================= */}
       {replaceModalOpen && targetReplaceRecord && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/85 backdrop-blur-md animate-in fade-in">
@@ -1422,7 +1842,7 @@ export const PayrollEngine: React.FC = () => {
       )}
 
       {/* ========================================================================= */}
-      {/* MODAL 4: DELETE CONFIRMATION MODAL                                         */}
+      {/* MODAL 5: DELETE CONFIRMATION MODAL                                         */}
       {/* ========================================================================= */}
       {deleteConfirmId && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/85 backdrop-blur-md animate-in fade-in">
@@ -1456,7 +1876,7 @@ export const PayrollEngine: React.FC = () => {
       )}
 
       {/* ========================================================================= */}
-      {/* MODAL 5: UNIVERSAL HIGH-FIDELITY PAYSLIP VIEWER & PRINT MODAL              */}
+      {/* MODAL 6: UNIVERSAL HIGH-FIDELITY PAYSLIP VIEWER & PRINT MODAL              */}
       {/* ========================================================================= */}
       {activePayslip && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/90 backdrop-blur-md animate-in fade-in overflow-y-auto">
