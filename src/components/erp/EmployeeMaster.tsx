@@ -595,6 +595,16 @@ export const EmployeeMaster: React.FC = () => {
               </div>
 
               <div className="flex items-center gap-2">
+                <button
+                  onClick={() => {
+                    setProfileModalEmp(null);
+                    setErpActiveTab('payroll');
+                  }}
+                  className="px-3 py-1.5 rounded-xl bg-amber-500/20 hover:bg-amber-500 text-amber-300 hover:text-slate-950 border border-amber-500/40 text-xs font-bold flex items-center gap-1.5 cursor-pointer transition-all"
+                >
+                  <Receipt className="w-3.5 h-3.5" />
+                  <span>View Payslips</span>
+                </button>
                 {(isSuperAdmin || role === 'HR_ADMIN') && (
                   <button
                     onClick={() => {
