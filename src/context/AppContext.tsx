@@ -184,7 +184,13 @@ interface AppContextType {
   applyLeave: (leave: Omit<LeaveRequest, 'id' | 'appliedOn' | 'status'>) => void;
   updateLeaveStatus: (leaveId: string, status: 'Approved' | 'Rejected', comment?: string) => void;
   
-  // Payroll Actions
+  // Payroll & Payslip Actions
+  payslips: PayslipRecord[];
+  uploadPayslip: (data: Omit<PayslipRecord, 'id' | 'uploadedAt' | 'uploadedBy'> & { file?: File }) => Promise<PayslipRecord>;
+  updatePayslip: (id: string, updates: Partial<PayslipRecord>, newFile?: File) => Promise<void>;
+  deletePayslip: (id: string) => void;
+  replacePayslipFile: (id: string, file: File) => Promise<void>;
+  getPayslipsForEmployee: (employeeId: string) => PayslipRecord[];
   processMonthlyPayroll: (month: string) => void;
   updatePayrollStatus: (payrollId: string, status: PayrollRecord['status']) => void;
   
