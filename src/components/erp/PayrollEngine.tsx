@@ -32,7 +32,9 @@ import {
   Sliders,
   Zap,
   CheckCheck,
-  ArrowUpDown
+  ArrowUpDown,
+  MapPin,
+  Users
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { PayslipRecord, Role } from '../../types';
@@ -47,7 +49,6 @@ export const PayrollEngine: React.FC = () => {
     deletePayslip,
     replacePayslipFile,
     employees,
-    sites,
     currentUser,
     companySettings,
     showToast,
@@ -57,8 +58,20 @@ export const PayrollEngine: React.FC = () => {
   const role: Role = currentUser?.role || 'EMPLOYEE';
   const isSuperAdmin = role === 'SUPER_ADMIN' || role === 'HR_ADMIN';
 
+  // Client Sites List
+  const CLIENT_SITES = [
+    'Microsoft India (R & D) Pvt. Ltd',
+    'Amazon Development Centre',
+    'Third Wave Coffee Roasters',
+    'DivyaSree NSL Orion SEZ',
+    'Google Signature Tower',
+    'L&T Infotech Park'
+  ];
+
+  // Active Site Tab ('all' or specific site name)
+  const [activeSiteTab, setActiveSiteTab] = useState<string>('all');
+
   // Filters
-  const [selectedSiteFilter, setSelectedSiteFilter] = useState<string>('all');
   const [selectedEmpFilter, setSelectedEmpFilter] = useState<string>('all');
   const [selectedMonthFilter, setSelectedMonthFilter] = useState<string>('all');
   const [selectedYearFilter, setSelectedYearFilter] = useState<string>('2026');
@@ -162,7 +175,7 @@ export const PayrollEngine: React.FC = () => {
       workingDays: att.totalDays,
       presentDays: att.paidDays,
       lopDays: att.absent,
-      remarks: `Generated as per ${month} Attendance SLA (${att.percentage}% - ${att.paidDays}/${att.totalDays} Paid Days at ${att.siteUnit})`
+      remarks: `Generated as per ${month} Attendance (${att.percentage}% SLA - ${att.paidDays}/${att.totalDays} Paid Days at ${att.siteUnit})`
     };
   };
 
@@ -213,14 +226,14 @@ export const PayrollEngine: React.FC = () => {
     scopedPayslips = payslips.filter(p => p.employeeId.toUpperCase() === userEmpId);
   }
 
-  // 2. Apply Filters & Search (Site, Employee, Month, Year, Query)
+  // 2. Filter by Site Tab, Person, Month, Year & Search Query
   const filteredPayslips = scopedPayslips.filter(p => {
-    // Site filter (Admin only)
-    if (isSuperAdmin && selectedSiteFilter !== 'all') {
-      const matchSite = p.siteName.toLowerCase().includes(selectedSiteFilter.toLowerCase());
+    // Separate Site Tab Filter (Super Admin)
+    if (isSuperAdmin && activeSiteTab !== 'all') {
+      const matchSite = p.siteName.toLowerCase().includes(activeSiteTab.toLowerCase());
       if (!matchSite) return false;
     }
-    // Employee filter (Admin only)
+    // Person filter
     if (isSuperAdmin && selectedEmpFilter !== 'all' && p.employeeId.toUpperCase() !== selectedEmpFilter.toUpperCase()) {
       return false;
     }
@@ -252,6 +265,12 @@ export const PayrollEngine: React.FC = () => {
   const totalEpf = filteredPayslips.reduce((acc, p) => acc + (p.epfDeduction || 0), 0);
   const totalEsi = filteredPayslips.reduce((acc, p) => acc + (p.esiDeduction || 0), 0);
 
+  // Helper: Count staff per site
+  const getStaffCountForSite = (siteName: string) => {
+    if (siteName === 'all') return employees.length;
+    return employees.filter(e => e.siteUnit?.toLowerCase().includes(siteName.toLowerCase())).length;
+  };
+
   // Handle File Selection in Upload Modal
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -272,16 +291,19 @@ export const PayrollEngine: React.FC = () => {
   };
 
   // Open Upload Modal
-  const handleOpenUploadModal = () => {
+  const handleOpenUploadModal = (preselectedSite?: string) => {
     setSelectedFile(null);
     setFilePreviewUrl('');
-    const firstEmp = employees[0]?.id || 'VPHS0040';
-    setUploadEmpId(firstEmp);
+    const targetSite = preselectedSite && preselectedSite !== 'all' ? preselectedSite : activeSiteTab !== 'all' ? activeSiteTab : CLIENT_SITES[0];
+    setUploadSite(targetSite);
+    
+    // Find first employee for this site
+    const siteEmp = employees.find(e => e.siteUnit?.toLowerCase().includes(targetSite.toLowerCase())) || employees[0];
+    const firstEmpId = siteEmp?.id || 'VPHS0040';
+    setUploadEmpId(firstEmpId);
     setUploadMonth('August');
     setUploadYear(2026);
-    const empObj = employees.find(e => e.id === firstEmp);
-    setUploadSite(empObj?.siteUnit || 'Microsoft India (R & D) Pvt. Ltd');
-    setSalaryInputs(calculateAttendanceSalary(firstEmp, 'August'));
+    setSalaryInputs(calculateAttendanceSalary(firstEmpId, 'August'));
     setUploadModalOpen(true);
   };
 
@@ -411,9 +433,8 @@ export const PayrollEngine: React.FC = () => {
   const handleRunBatchSitePayroll = async () => {
     setIsBatchGenerating(true);
     try {
-      // Find all employees belonging to batchSiteName
       const siteEmployees = employees.filter(
-        e => batchSiteName === 'All Sites' || e.siteUnit?.toLowerCase().includes(batchSiteName.toLowerCase())
+        e => batchSiteName === 'all' || batchSiteName === 'All Sites' || e.siteUnit?.toLowerCase().includes(batchSiteName.toLowerCase())
       );
 
       let processedCount = 0;
@@ -433,7 +454,6 @@ export const PayrollEngine: React.FC = () => {
           attSalary.employerEsi
         );
 
-        // Check if payslip already exists for this person + monthYear
         const existing = payslips.find(
           p => p.employeeId.toUpperCase() === emp.id.toUpperCase() && p.month === batchMonth && p.year === batchYear
         );
@@ -573,8 +593,9 @@ export const PayrollEngine: React.FC = () => {
 
     const ws = XLSX.utils.json_to_sheet(exportRows);
     const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'VPHS Salary Disbursals');
-    XLSX.writeFile(wb, `VPHS_NEFT_Payroll_Sheet_${selectedYearFilter}.xlsx`);
+    const sheetName = activeSiteTab === 'all' ? 'VPHS All Sites Payroll' : activeSiteTab.slice(0, 30);
+    XLSX.utils.book_append_sheet(wb, ws, sheetName);
+    XLSX.writeFile(wb, `VPHS_Payroll_${activeSiteTab.replace(/\s+/g, '_')}_${selectedYearFilter}.xlsx`);
     showToast('Exported official Bank Transfer Sheet (XLSX)!', 'success');
   };
 
@@ -584,20 +605,9 @@ export const PayrollEngine: React.FC = () => {
     'July', 'August', 'September', 'October', 'November', 'December'
   ];
 
-  // Unique client sites list
-  const SITE_OPTIONS = [
-    'All Sites',
-    'Microsoft India (R & D) Pvt. Ltd',
-    'Amazon Development Centre',
-    'Third Wave Coffee Roasters',
-    'DivyaSree NSL Orion SEZ',
-    'Google Signature Tower',
-    'L&T Infotech Park'
-  ];
-
   return (
     <div className="space-y-6">
-      {/* 1. Header Banner & Action Bar */}
+      {/* 1. Header Banner */}
       <div className="bg-[#0b1329] border border-[#1f2f58] rounded-3xl p-6 shadow-xl flex flex-col lg:flex-row items-start lg:items-center justify-between gap-6 relative overflow-hidden">
         <div className="absolute right-0 top-0 bottom-0 w-96 bg-amber-500/5 rounded-full blur-3xl pointer-events-none"></div>
 
@@ -607,7 +617,7 @@ export const PayrollEngine: React.FC = () => {
               ₹
             </div>
             <h2 className="text-xl font-black text-white">
-              {isSuperAdmin ? 'Attendance-Linked Payslip Engine & Site Manager' : 'My Payslips & Compensation Portal'}
+              {isSuperAdmin ? 'Site-Wise Attendance Payslip Vault & Person Customization' : 'My Payslips & Compensation Portal'}
             </h2>
             <span className="px-2.5 py-0.5 rounded-full bg-amber-500/20 text-amber-400 text-xs font-mono font-bold border border-amber-500/30">
               {selectedYearFilter}
@@ -615,7 +625,7 @@ export const PayrollEngine: React.FC = () => {
           </div>
           <p className="text-xs text-slate-400 max-w-2xl">
             {isSuperAdmin
-              ? 'Generate payslips dynamically as per actual monthly attendance, select client sites, and customize individual person salary components with full editable access.'
+              ? 'Organized by separate client sites with attendance-linked automatic salary calculations and individual person editable access.'
               : `Official computerized wage slips for ${currentUser?.name || 'Employee'}. View and download your monthly compensation and statutory contribution records.`}
           </p>
         </div>
@@ -624,22 +634,27 @@ export const PayrollEngine: React.FC = () => {
         <div className="flex flex-wrap items-center gap-3 relative z-10">
           {isSuperAdmin && (
             <>
-              {/* Batch Site Attendance Generator Button */}
+              {/* Batch Generate for Active Site */}
               <button
-                onClick={() => setBatchSiteModalOpen(true)}
+                onClick={() => {
+                  setBatchSiteName(activeSiteTab === 'all' ? CLIENT_SITES[0] : activeSiteTab);
+                  setBatchSiteModalOpen(true);
+                }}
                 className="px-4 py-2.5 bg-gradient-to-r from-sky-500 to-blue-600 hover:from-sky-400 hover:to-blue-500 text-slate-950 rounded-xl font-extrabold text-xs shadow-md transition-all hover:scale-105 flex items-center gap-2 cursor-pointer"
               >
                 <Zap className="w-4 h-4 text-slate-950" />
-                <span>⚡ Generate from Site Attendance</span>
+                <span>
+                  {activeSiteTab === 'all' ? '⚡ Generate Site Attendance Payroll' : `⚡ Generate for ${activeSiteTab.split(' ')[0]}`}
+                </span>
               </button>
 
-              {/* Upload / Single Generator Button */}
+              {/* Upload Person Payslip */}
               <button
-                onClick={handleOpenUploadModal}
+                onClick={() => handleOpenUploadModal(activeSiteTab)}
                 className="px-4 py-2.5 bg-gradient-to-r from-amber-500 via-amber-400 to-amber-500 hover:from-amber-400 hover:to-amber-300 text-slate-950 rounded-xl font-extrabold text-xs shadow-gold-sm transition-all hover:scale-105 flex items-center gap-2 cursor-pointer"
               >
                 <Upload className="w-4 h-4" />
-                <span>+ Upload / Add Person Payslip</span>
+                <span>+ Upload / Add Person</span>
               </button>
 
               <button
@@ -647,7 +662,7 @@ export const PayrollEngine: React.FC = () => {
                 className="px-3.5 py-2.5 bg-slate-900 hover:bg-slate-800 text-slate-200 border border-[#1f2f58] rounded-xl text-xs font-semibold flex items-center gap-1.5 shadow transition-all cursor-pointer"
               >
                 <Download className="w-4 h-4 text-emerald-400" />
-                <span>Bank NEFT Sheet (XLSX)</span>
+                <span>Export Bank Sheet (XLSX)</span>
               </button>
             </>
           )}
@@ -664,38 +679,88 @@ export const PayrollEngine: React.FC = () => {
         </div>
       </div>
 
-      {/* 2. Super Admin Metric Cards */}
+      {/* 2. SEPARATE CLIENT SITE TABS (SUPER ADMIN ONLY) */}
+      {isSuperAdmin && (
+        <div className="bg-[#0b1329] border border-[#1f2f58] rounded-2xl p-2 shadow-lg flex items-center gap-2 overflow-x-auto">
+          {/* All Sites Tab */}
+          <button
+            onClick={() => setActiveSiteTab('all')}
+            className={`px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-2 cursor-pointer whitespace-nowrap ${
+              activeSiteTab === 'all'
+                ? 'bg-amber-500 text-slate-950 shadow-gold-sm'
+                : 'text-slate-300 hover:text-white hover:bg-slate-900'
+            }`}
+          >
+            <Building className="w-3.5 h-3.5" />
+            <span>All Client Sites</span>
+            <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-mono font-black ${
+              activeSiteTab === 'all' ? 'bg-slate-950 text-amber-400' : 'bg-slate-800 text-slate-300'
+            }`}>
+              {employees.length}
+            </span>
+          </button>
+
+          {/* Individual Site Tabs */}
+          {CLIENT_SITES.map(siteName => {
+            const count = getStaffCountForSite(siteName);
+            const isSelected = activeSiteTab.toLowerCase() === siteName.toLowerCase();
+            return (
+              <button
+                key={siteName}
+                onClick={() => setActiveSiteTab(siteName)}
+                className={`px-3.5 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-2 cursor-pointer whitespace-nowrap ${
+                  isSelected
+                    ? 'bg-amber-500 text-slate-950 shadow-gold-sm'
+                    : 'text-slate-300 hover:text-white hover:bg-slate-900'
+                }`}
+              >
+                <MapPin className="w-3.5 h-3.5 opacity-70" />
+                <span>{siteName}</span>
+                <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-mono font-black ${
+                  isSelected ? 'bg-slate-950 text-amber-400' : 'bg-slate-800 text-slate-300'
+                }`}>
+                  {count}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+
+      {/* 3. Site Metric Cards */}
       {isSuperAdmin && (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
           <div className="p-5 rounded-2xl bg-[#0b1329] border border-[#1f2f58] space-y-1 shadow">
-            <span className="text-[11px] font-bold text-amber-400 uppercase tracking-wider block">Filtered Payslips</span>
-            <div className="text-2xl font-black text-white font-mono">{filteredPayslips.length} Records</div>
+            <span className="text-[11px] font-bold text-amber-400 uppercase tracking-wider block">
+              {activeSiteTab === 'all' ? 'All Deployed Personnel' : 'Site Deployed Staff'}
+            </span>
+            <div className="text-2xl font-black text-white font-mono">{filteredPayslips.length} Payslips</div>
             <p className="text-[11px] text-slate-400">
-              {selectedSiteFilter === 'all' ? 'All Client Campuses' : selectedSiteFilter}
+              {activeSiteTab === 'all' ? 'Across all 6 client facilities' : activeSiteTab}
             </p>
           </div>
 
           <div className="p-5 rounded-2xl bg-[#0b1329] border border-[#1f2f58] space-y-1 shadow">
-            <span className="text-[11px] font-bold text-emerald-400 uppercase tracking-wider block">Net Take-Home Disbursed</span>
+            <span className="text-[11px] font-bold text-emerald-400 uppercase tracking-wider block">Site Net Disbursal</span>
             <div className="text-2xl font-black text-emerald-300 font-mono">₹{totalNetDisbursed.toLocaleString('en-IN')}</div>
             <p className="text-[11px] text-slate-400">Total Gross: ₹{totalGrossDisbursed.toLocaleString('en-IN')}</p>
           </div>
 
           <div className="p-5 rounded-2xl bg-[#0b1329] border border-[#1f2f58] space-y-1 shadow">
-            <span className="text-[11px] font-bold text-sky-400 uppercase tracking-wider block">Total EPFO Remittance</span>
+            <span className="text-[11px] font-bold text-sky-400 uppercase tracking-wider block">EPFO Statutory (12%)</span>
             <div className="text-2xl font-black text-sky-300 font-mono">₹{totalEpf.toLocaleString('en-IN')}</div>
             <p className="text-[11px] text-slate-400 font-mono">EPF Code: {companySettings.epfoCode}</p>
           </div>
 
           <div className="p-5 rounded-2xl bg-[#0b1329] border border-[#1f2f58] space-y-1 shadow">
-            <span className="text-[11px] font-bold text-purple-400 uppercase tracking-wider block">Total ESIC Remittance</span>
+            <span className="text-[11px] font-bold text-purple-400 uppercase tracking-wider block">ESIC Statutory (0.75%)</span>
             <div className="text-2xl font-black text-purple-300 font-mono">₹{totalEsi.toLocaleString('en-IN')}</div>
             <p className="text-[11px] text-slate-400 font-mono">ESIC Code: {companySettings.esicCode}</p>
           </div>
         </div>
       )}
 
-      {/* 3. Employee Self-Service Header Card (When Logged in as Employee) */}
+      {/* 4. Employee Self-Service Header Card (When Logged in as Employee) */}
       {!isSuperAdmin && (
         <div className="bg-gradient-to-r from-[#111c38] via-[#152244] to-[#0b1329] border border-[#1f2f58] rounded-3xl p-6 shadow-xl flex flex-col md:flex-row items-start md:items-center justify-between gap-6">
           <div className="flex items-center gap-4">
@@ -728,28 +793,10 @@ export const PayrollEngine: React.FC = () => {
         </div>
       )}
 
-      {/* 4. Filters & Search Bar (Site, Employee, Month, Year) */}
+      {/* 5. Filters & Search Bar (Person, Month, Year, Search) */}
       <div className="bg-[#0b1329] border border-[#1f2f58] rounded-2xl p-4 shadow-lg flex flex-col md:flex-row items-stretch md:items-center justify-between gap-4">
         <div className="flex flex-wrap items-center gap-3">
-          {/* Site Selector (Super Admin Only) */}
-          {isSuperAdmin && (
-            <div className="flex items-center gap-1.5 bg-[#070e1e] border border-[#1f2f58] rounded-xl px-2.5 py-1.5">
-              <Building2 className="w-3.5 h-3.5 text-amber-400" />
-              <select
-                value={selectedSiteFilter}
-                onChange={(e) => setSelectedSiteFilter(e.target.value)}
-                className="bg-transparent text-xs font-bold text-white focus:outline-none cursor-pointer max-w-[180px]"
-              >
-                {SITE_OPTIONS.map(s => (
-                  <option key={s} value={s === 'All Sites' ? 'all' : s} className="bg-slate-900 text-white">
-                    {s}
-                  </option>
-                ))}
-              </select>
-            </div>
-          )}
-
-          {/* Employee Selector (Super Admin Only) */}
+          {/* Person Selector (Super Admin Only) */}
           {isSuperAdmin && (
             <div className="flex items-center gap-1.5 bg-[#070e1e] border border-[#1f2f58] rounded-xl px-2.5 py-1.5">
               <User className="w-3.5 h-3.5 text-sky-400" />
@@ -758,12 +805,14 @@ export const PayrollEngine: React.FC = () => {
                 onChange={(e) => setSelectedEmpFilter(e.target.value)}
                 className="bg-transparent text-xs font-bold text-white focus:outline-none cursor-pointer max-w-[180px]"
               >
-                <option value="all" className="bg-slate-900 text-white">All Persons ({employees.length})</option>
-                {employees.map(emp => (
-                  <option key={emp.id} value={emp.id} className="bg-slate-900 text-white">
-                    {emp.id} - {emp.name}
-                  </option>
-                ))}
+                <option value="all" className="bg-slate-900 text-white">All Persons</option>
+                {employees
+                  .filter(e => activeSiteTab === 'all' || e.siteUnit?.toLowerCase().includes(activeSiteTab.toLowerCase()))
+                  .map(emp => (
+                    <option key={emp.id} value={emp.id} className="bg-slate-900 text-white">
+                      {emp.id} - {emp.name}
+                    </option>
+                  ))}
               </select>
             </div>
           )}
@@ -803,7 +852,7 @@ export const PayrollEngine: React.FC = () => {
           <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
           <input
             type="text"
-            placeholder="Search person, site, ID..."
+            placeholder="Search person, ID..."
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             className="w-full bg-[#070e1e] border border-[#1f2f58] rounded-xl pl-9 pr-3 py-2 text-xs text-white focus:outline-none focus:border-amber-500 font-medium"
@@ -811,19 +860,19 @@ export const PayrollEngine: React.FC = () => {
         </div>
       </div>
 
-      {/* 5. Payslips Table */}
+      {/* 6. Payslips Table for Selected Site */}
       <div className="bg-[#0b1329] border border-[#1f2f58] rounded-3xl overflow-hidden shadow-2xl">
         <div className="overflow-x-auto">
           <table className="w-full text-left text-xs text-slate-300">
             <thead className="bg-[#070e1e] text-slate-400 font-bold uppercase text-[10px] tracking-wider border-b border-[#1f2f58]">
               <tr>
                 <th className="px-4 py-3.5">Employee & ID</th>
-                <th className="px-4 py-3.5">Client Site / Campus</th>
-                <th className="px-4 py-3.5">Period & Days</th>
+                <th className="px-4 py-3.5">Assigned Site</th>
+                <th className="px-4 py-3.5">Period & Attendance Days</th>
                 <th className="px-4 py-3.5">Gross (A)</th>
                 <th className="px-4 py-3.5">Deductions (C)</th>
                 <th className="px-4 py-3.5">Net Take-Home</th>
-                <th className="px-4 py-3.5">Attached File</th>
+                <th className="px-4 py-3.5">Attached Document</th>
                 <th className="px-4 py-3.5 text-right">Actions</th>
               </tr>
             </thead>
@@ -832,22 +881,27 @@ export const PayrollEngine: React.FC = () => {
                 <tr>
                   <td colSpan={8} className="text-center py-12 text-slate-500">
                     <Receipt className="w-10 h-10 mx-auto text-slate-600 mb-2 opacity-50" />
-                    <p className="font-semibold text-slate-400">No payslips found matching your filters.</p>
+                    <p className="font-semibold text-slate-400">
+                      No payslips found for {activeSiteTab === 'all' ? 'any site' : activeSiteTab}.
+                    </p>
                     {isSuperAdmin && (
                       <div className="flex items-center justify-center gap-3 mt-3">
                         <button
-                          onClick={() => setBatchSiteModalOpen(true)}
+                          onClick={() => {
+                            setBatchSiteName(activeSiteTab === 'all' ? CLIENT_SITES[0] : activeSiteTab);
+                            setBatchSiteModalOpen(true);
+                          }}
                           className="px-4 py-2 rounded-xl bg-sky-500 text-slate-950 font-bold text-xs shadow inline-flex items-center gap-1.5"
                         >
                           <Zap className="w-3.5 h-3.5" />
-                          <span>Generate from Site Attendance</span>
+                          <span>Generate Attendance Payslips for this Site</span>
                         </button>
                         <button
-                          onClick={handleOpenUploadModal}
+                          onClick={() => handleOpenUploadModal(activeSiteTab)}
                           className="px-4 py-2 rounded-xl bg-amber-500 text-slate-950 font-bold text-xs shadow inline-flex items-center gap-1.5"
                         >
                           <Upload className="w-3.5 h-3.5" />
-                          <span>Add Individual Payslip</span>
+                          <span>Add Individual Person Slip</span>
                         </button>
                       </div>
                     )}
@@ -958,11 +1012,11 @@ export const PayrollEngine: React.FC = () => {
                         {/* Super Admin Exclusive Controls */}
                         {isSuperAdmin && (
                           <>
-                            {/* Person-Specific Edit Payslip Button */}
+                            {/* Person-Specific Edit Payslip Button (Editable Access) */}
                             <button
                               onClick={() => handleOpenEditModal(payslip)}
                               className="p-1.5 rounded-lg bg-amber-500/10 hover:bg-amber-500/30 text-amber-400 hover:text-amber-300 border border-amber-500/30 transition-all cursor-pointer"
-                              title="Edit Person Payslip Details & Salary"
+                              title="Edit Person Salary & Particulars (Editable Access)"
                             >
                               <Edit2 className="w-3.5 h-3.5" />
                             </button>
@@ -1032,7 +1086,7 @@ export const PayrollEngine: React.FC = () => {
                     onChange={(e) => setBatchSiteName(e.target.value)}
                     className="w-full bg-[#0b1329] border border-[#1f2f58] rounded-xl px-3 py-2 text-white font-bold cursor-pointer"
                   >
-                    {SITE_OPTIONS.map(s => (
+                    {CLIENT_SITES.map(s => (
                       <option key={s} value={s} className="bg-slate-900">{s}</option>
                     ))}
                   </select>
@@ -1069,13 +1123,13 @@ export const PayrollEngine: React.FC = () => {
                 <div className="flex items-center justify-between text-xs font-bold text-amber-400 uppercase tracking-wider">
                   <span>Site Attendance Preview</span>
                   <span className="text-[10px] text-slate-400 font-mono">
-                    {employees.filter(e => batchSiteName === 'All Sites' || e.siteUnit?.toLowerCase().includes(batchSiteName.toLowerCase())).length} Deployed Personnel
+                    {employees.filter(e => e.siteUnit?.toLowerCase().includes(batchSiteName.toLowerCase())).length} Deployed Staff
                   </span>
                 </div>
 
                 <div className="max-h-48 overflow-y-auto space-y-1.5 pr-1">
                   {employees
-                    .filter(e => batchSiteName === 'All Sites' || e.siteUnit?.toLowerCase().includes(batchSiteName.toLowerCase()))
+                    .filter(e => e.siteUnit?.toLowerCase().includes(batchSiteName.toLowerCase()))
                     .map(emp => {
                       const att = getAttendanceMetricsForEmp(emp.id, batchMonth);
                       return (
@@ -1097,7 +1151,7 @@ export const PayrollEngine: React.FC = () => {
               <div className="p-3 bg-sky-950/40 border border-sky-500/30 rounded-2xl text-xs text-sky-200 flex items-start gap-2">
                 <Sparkles className="w-4 h-4 text-sky-400 flex-shrink-0 mt-0.5" />
                 <span>
-                  Every generated payslip is pro-rated as per actual attendance and can subsequently be customized individually with full editable access per person.
+                  Every generated payslip is calculated as per actual attendance and can subsequently be customized per person with full editable access.
                 </span>
               </div>
             </div>
@@ -1221,7 +1275,7 @@ export const PayrollEngine: React.FC = () => {
                     onChange={(e) => setUploadSite(e.target.value)}
                     className="w-full bg-[#0b1329] border border-[#1f2f58] rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-amber-500 font-bold cursor-pointer"
                   >
-                    {SITE_OPTIONS.filter(s => s !== 'All Sites').map(s => (
+                    {CLIENT_SITES.map(s => (
                       <option key={s} value={s} className="bg-slate-900">{s}</option>
                     ))}
                   </select>
@@ -1291,7 +1345,7 @@ export const PayrollEngine: React.FC = () => {
                 <div className="flex items-center justify-between pb-2 border-b border-[#1f2f58]">
                   <span className="text-xs font-bold text-amber-400 uppercase tracking-wider flex items-center gap-1.5">
                     <Sparkles className="w-3.5 h-3.5" />
-                    Editable Salary Breakdown (Customizable)
+                    Editable Salary Breakdown (Customizable per Person)
                   </span>
                   <span className="text-[10px] text-slate-400">All fields editable</span>
                 </div>
@@ -1432,7 +1486,7 @@ export const PayrollEngine: React.FC = () => {
       )}
 
       {/* ========================================================================= */}
-      {/* MODAL 3: PERSON-SPECIFIC EDIT MODAL (WITH ATTENDANCE SYNC)                 */}
+      {/* MODAL 3: PERSON-SPECIFIC EDIT MODAL (WITH ATTENDANCE SYNC & EDIT ACCESS)   */}
       {/* ========================================================================= */}
       {editModalOpen && editingRecord && editTotals && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/85 backdrop-blur-md animate-in fade-in overflow-y-auto">
@@ -1456,7 +1510,7 @@ export const PayrollEngine: React.FC = () => {
                     </span>
                   </div>
                   <p className="text-xs text-slate-400">
-                    Full editable access: modify salary numbers, attendance days, client site, and bank particulars.
+                    Full editable access: modify salary numbers, attendance days, client site, and bank particulars based on this person.
                   </p>
                 </div>
               </div>
@@ -1512,7 +1566,7 @@ export const PayrollEngine: React.FC = () => {
                       onChange={(e) => setEditingRecord({ ...editingRecord, siteName: e.target.value })}
                       className="w-full bg-[#0b1329] border border-[#1f2f58] rounded-xl px-3 py-2 text-white font-bold cursor-pointer"
                     >
-                      {SITE_OPTIONS.filter(s => s !== 'All Sites').map(s => (
+                      {CLIENT_SITES.map(s => (
                         <option key={s} value={s} className="bg-slate-900">{s}</option>
                       ))}
                     </select>
