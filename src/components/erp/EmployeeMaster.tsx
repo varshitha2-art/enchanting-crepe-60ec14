@@ -26,7 +26,8 @@ import {
   KeyRound,
   Sliders,
   Check,
-  RotateCcw
+  RotateCcw,
+  Receipt
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { Employee, Role, User, UserPermissions } from '../../types';
