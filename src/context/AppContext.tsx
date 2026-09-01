@@ -328,6 +328,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }));
   });
 
+  const [payslips, setPayslips] = useState<PayslipRecord[]>(() => {
+    const saved = localStorage.getItem('vphs_payslips');
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      } catch (e) {
+        return INITIAL_PAYSLIPS;
+      }
+    }
+    return INITIAL_PAYSLIPS;
+  });
+
   const [notifications, setNotifications] = useState<{ id: string; type: 'success' | 'error' | 'info' | 'warning'; message: string }[]>([]);
 
   // Sync to localStorage
@@ -378,6 +391,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   useEffect(() => {
     localStorage.setItem('vphs_payroll', JSON.stringify(payroll));
   }, [payroll]);
+
+  useEffect(() => {
+    localStorage.setItem('vphs_payslips', JSON.stringify(payslips));
+  }, [payslips]);
 
   // Toast Helper
   const showToast = (message: string, type: 'success' | 'error' | 'info' | 'warning' = 'success') => {
